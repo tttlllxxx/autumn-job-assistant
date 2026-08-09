@@ -1,6 +1,8 @@
 import asyncio
 import json
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -8,9 +10,20 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.core.database import Base
+from app.api import sources as source_api
+from app.models.entities import JobPosting, SourceRun
+from app.schemas.jobs import SourceUpdate
+from app.sources.ats import AshbySourceAdapter, GreenhouseSourceAdapter, LeverSourceAdapter, MokaSourceAdapter
 from app.sources.base import CrawlContext, OfficialSourceAdapter, normalize_url
-from app.sources.dynamic import AntSourceAdapter, MihoyoSourceAdapter, NeteaseSourceAdapter
-from app.sources.registry import REGISTRY, SOURCE_FIELD_MAPS, get_registry, save_custom_source_configs
+from app.sources.dynamic import AntSourceAdapter, MihoyoSourceAdapter, NeteaseSourceAdapter, TencentSourceAdapter
+from app.sources.registry import (
+    REGISTRY,
+    SOURCE_FIELD_MAPS,
+    build_custom_adapter,
+    get_registry,
+    save_custom_source_configs,
+    save_source_entry_overrides,
+)
 from app.cli.live_sources import main as live_sources_main
 
 
@@ -27,8 +40,10 @@ def test_registry_contains_exactly_fifteen_target_companies() -> None:
     assert set(SOURCE_FIELD_MAPS) == set(REGISTRY)
     assert all({"title", "id", "description", "location"}.issubset(adapter.field_map) for adapter in REGISTRY.values())
     assert isinstance(REGISTRY["ant"], AntSourceAdapter)
+    assert isinstance(REGISTRY["tencent"], TencentSourceAdapter)
     assert isinstance(REGISTRY["netease"], NeteaseSourceAdapter)
     assert isinstance(REGISTRY["mihoyo"], MihoyoSourceAdapter)
+    assert isinstance(REGISTRY["didi"], MokaSourceAdapter)
 
 
 def test_custom_source_is_persisted_and_merged_without_changing_builtin_registry() -> None:
@@ -46,6 +61,251 @@ def test_custom_source_is_persisted_and_merged_without_changing_builtin_registry
     assert len(combined) == 16
     assert combined["custom_fictional"].display_name == "虚构公司"
     assert combined["custom_fictional"]._is_official("https://careers.example.invalid/jobs/1")
+
+
+@pytest.mark.parametrize(
+    ("url", "adapter_type", "api_url"),
+    [
+        (
+            "https://job-boards.greenhouse.io/example",
+            GreenhouseSourceAdapter,
+            "https://boards-api.greenhouse.io/v1/boards/example/jobs?content=true",
+        ),
+        (
+            "https://jobs.lever.co/example",
+            LeverSourceAdapter,
+            "https://api.lever.co/v0/postings/example",
+        ),
+        (
+            "https://jobs.ashbyhq.com/example",
+            AshbySourceAdapter,
+            "https://api.ashbyhq.com/posting-api/job-board/example",
+        ),
+        (
+            "https://app.mokahr.com/campus_apply/example/12345",
+            MokaSourceAdapter,
+            "https://api.mokahr.com/api-platform/v1/jobs/example",
+        ),
+    ],
+)
+def test_custom_source_automatically_selects_public_ats_adapter(
+    url: str,
+    adapter_type: type[OfficialSourceAdapter],
+    api_url: str,
+) -> None:
+    adapter = build_custom_adapter({
+        "source_key": "custom_fixture",
+        "display_name": "虚构公司",
+        "official_entry": url,
+    })
+
+    assert isinstance(adapter, adapter_type)
+    assert adapter.api_url == api_url
+    assert adapter.collection_method == "ATS 公开 API"
+
+
+def test_builtin_source_entry_override_is_persisted_without_mutating_registry() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    original = REGISTRY["bytedance"].start_url
+    updated = "https://jobs.bytedance.com/campus/new-entry"
+    with Session(engine) as db:
+        save_source_entry_overrides(db, {"bytedance": updated})
+        combined = get_registry(db)
+
+    assert combined["bytedance"].start_url == updated
+    assert combined["bytedance"]._is_official("https://jobs.bytedance.com/campus/position/1")
+    assert REGISTRY["bytedance"].start_url == original
+
+
+def test_source_list_includes_active_latest_and_unverified_counts() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add_all([
+            JobPosting(
+                company="字节跳动", source_key="bytedance", external_job_id="J1", title="虚构岗位一",
+                description="虚构岗位正文一", normalized_url="https://jobs.bytedance.com/campus/position/1",
+                description_hash="1" * 64, graduation_year="2027", closed=False,
+            ),
+            JobPosting(
+                company="字节跳动", source_key="bytedance", external_job_id="J2", title="虚构岗位二",
+                description="虚构岗位正文二", normalized_url="https://jobs.bytedance.com/campus/position/2",
+                description_hash="2" * 64, graduation_year=None, closed=False,
+            ),
+            JobPosting(
+                company="字节跳动", source_key="bytedance", external_job_id="J3", title="已关闭岗位",
+                description="已关闭岗位正文", normalized_url="https://jobs.bytedance.com/campus/position/3",
+                description_hash="3" * 64, graduation_year="2027", closed=True,
+            ),
+            SourceRun(
+                source_key="bytedance", adapter_version="fixture", success=True,
+                discovered_count=7, finished_at=datetime.now(UTC),
+            ),
+        ])
+        db.commit()
+        items = source_api.list_sources(page=1, page_size=50, status=None, _=SimpleNamespace(), db=db)
+
+    bytedance = next(item for item in items if item["source_key"] == "bytedance")
+    assert bytedance["active_job_count"] == 2
+    assert bytedance["year_unverified_count"] == 1
+    assert bytedance["last_discovered_count"] == 7
+    assert bytedance["collection_method"] == "官方网页"
+
+
+@pytest.mark.asyncio
+async def test_greenhouse_public_api_maps_complete_job() -> None:
+    adapter = build_custom_adapter({
+        "source_key": "custom_greenhouse",
+        "display_name": "虚构公司",
+        "official_entry": "https://job-boards.greenhouse.io/example",
+    })
+    response = {"jobs": [{
+        "id": 101,
+        "title": "2027 New Grad Software Engineer",
+        "absolute_url": "https://job-boards.greenhouse.io/example/jobs/101",
+        "content": "<p>Build reliable AI services with Python.</p>",
+        "location": {"name": "Shanghai"},
+        "departments": [{"name": "Engineering"}],
+        "first_published": "2026-08-01T08:00:00Z",
+    }]}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _request: httpx.Response(200, json=response)
+    )) as client:
+        context = CrawlContext(client=client, max_jobs=10)
+        stubs = await adapter.discover(context)
+        payload = await adapter.fetch_detail(stubs[0], context)
+
+    assert payload.external_job_id == "101"
+    assert payload.graduation_year == "2027"
+    assert payload.location == "Shanghai"
+    assert payload.department == "Engineering"
+    assert payload.description == "Build reliable AI services with Python."
+
+
+@pytest.mark.asyncio
+async def test_lever_public_api_keeps_description_sections() -> None:
+    adapter = build_custom_adapter({
+        "source_key": "custom_lever",
+        "display_name": "虚构公司",
+        "official_entry": "https://jobs.lever.co/example",
+    })
+    response = [{
+        "id": "lever-101",
+        "text": "Software Engineer, University Graduate 2027",
+        "hostedUrl": "https://jobs.lever.co/example/lever-101",
+        "descriptionPlain": "Build the search platform.",
+        "lists": [{"text": "Requirements", "content": "<ul><li>Python</li><li>SQL</li></ul>"}],
+        "categories": {"location": "Beijing", "team": "Search", "commitment": "Full-time"},
+        "createdAt": 1785542400000,
+    }]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _request: httpx.Response(200, json=response)
+    )) as client:
+        context = CrawlContext(client=client, max_jobs=10)
+        stubs = await adapter.discover(context)
+        payload = await adapter.fetch_detail(stubs[0], context)
+
+    assert payload.external_job_id == "lever-101"
+    assert payload.department == "Search"
+    assert "Requirements" in payload.description
+    assert "Python" in payload.description
+    assert payload.published_at is not None
+
+
+@pytest.mark.asyncio
+async def test_ashby_public_api_combines_secondary_locations() -> None:
+    adapter = build_custom_adapter({
+        "source_key": "custom_ashby",
+        "display_name": "虚构公司",
+        "official_entry": "https://jobs.ashbyhq.com/example",
+    })
+    response = {"jobs": [{
+        "id": "ashby-101",
+        "title": "2027 Graduate AI Engineer",
+        "jobUrl": "https://jobs.ashbyhq.com/example/ashby-101",
+        "descriptionHtml": "<p>Develop and evaluate model-serving systems.</p>",
+        "location": "Shanghai",
+        "secondaryLocations": [{"location": "Beijing"}, {"location": "Shanghai"}],
+        "department": "AI Platform",
+        "employmentType": "FullTime",
+        "publishedAt": "2026-08-02T08:00:00Z",
+    }]}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _request: httpx.Response(200, json=response)
+    )) as client:
+        context = CrawlContext(client=client, max_jobs=10)
+        stubs = await adapter.discover(context)
+        payload = await adapter.fetch_detail(stubs[0], context)
+
+    assert payload.external_job_id == "ashby-101"
+    assert payload.location == "Shanghai、Beijing"
+    assert payload.department == "AI Platform"
+    assert payload.graduation_year == "2027"
+
+
+@pytest.mark.asyncio
+async def test_moka_public_campus_api_paginates_and_maps_complete_job() -> None:
+    adapter = REGISTRY["didi"]
+    response = {"total": 1, "jobs": [{
+        "id": "moka-101",
+        "title": "2027未来精英-大模型工程师",
+        "description": "<p>负责大模型训练与服务平台开发。</p><p>要求熟悉 Python。</p>",
+        "locations": [{"name": "北京"}, {"name": "上海"}],
+        "department": {"id": 1, "name": "自动驾驶"},
+        "commitment": "全职",
+        "publishedAt": "2026-05-12T11:45:14.000Z",
+    }]}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.mokahr.com"
+        assert request.url.params["mode"] == "campus"
+        assert request.url.params["status"] == "open"
+        assert request.url.params["siteId"] == "96064"
+        return httpx.Response(200, json=response)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        context = CrawlContext(client=client, max_jobs=10)
+        stubs = await adapter.discover(context)
+        payload = await adapter.fetch_detail(stubs[0], context)
+
+    assert payload.external_job_id == "moka-101"
+    assert payload.location == "北京、上海"
+    assert payload.department == "自动驾驶"
+    assert payload.recruitment_type == "校园招聘 · 全职"
+    assert payload.graduation_year == "2027"
+    assert "熟悉 Python" in payload.description
+
+
+@pytest.mark.asyncio
+async def test_source_entry_update_persists_and_runs_source(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    calls: list[str] = []
+
+    async def fake_run_source(_db, source_key: str, **_kwargs):
+        calls.append(source_key)
+        return SimpleNamespace(
+            success=True,
+            discovered_count=5,
+            new_count=2,
+            updated_count=1,
+            error_message=None,
+            finished_at=None,
+        )
+
+    monkeypatch.setattr(source_api, "run_source", fake_run_source)
+    with Session(engine) as db:
+        result = await source_api.update_source_entry(
+            "bytedance",
+            SourceUpdate(official_entry="https://jobs.bytedance.com/campus/new-entry"),
+            db,
+        )
+        assert get_registry(db)["bytedance"].start_url == "https://jobs.bytedance.com/campus/new-entry"
+
+    assert calls == ["bytedance"]
+    assert result["success"] is True
+    assert result["discovered"] == 5
 
 
 def test_embedded_official_json_maps_fields_and_rejects_foreign_url() -> None:
@@ -131,6 +391,81 @@ async def test_http_attempts_are_counted_in_crawl_context() -> None:
 
     assert len(stubs) == 1
     assert context.request_count == 1
+
+
+def test_tencent_rejects_overseas_workday_job() -> None:
+    adapter = REGISTRY["tencent"]
+    stub = adapter._stub_from_object({
+        "RecruitPostId": "R107692",
+        "RecruitPostName": "Financial Management and Analysis 2027 Internship",
+        "Responsibility": "Support the Palo Alto finance team",
+        "RecruitTypeName": "Campus internship",
+        "LocationName": "US-California-Palo-Alto",
+        "PostURL": "https://tencent.wd1.myworkdayjobs.com/Tencent_Careers/job/R107692",
+    })
+
+    assert stub is None
+
+
+@pytest.mark.asyncio
+async def test_tencent_api_keeps_only_china_2027_campus_jobs() -> None:
+    mapping_response = {"status": 0, "data": [{"subProjectList": [
+        {
+            "mappingId": 1,
+            "recruitType": 1,
+            "projectName": "2026校园招聘",
+            "recruitYear": "2026",
+            "recruitRangDesc": "毕业时间截至2026年12月31日",
+        },
+        {
+            "mappingId": 14,
+            "recruitType": 999,
+            "projectName": "青云计划-应届生",
+            "recruitYear": "2027",
+            "recruitRangDesc": "毕业时间截至2027年12月31日",
+        },
+    ]}]}
+    search_response = {"status": 0, "data": {"count": 1, "positionList": [{
+        "postId": "TX-CAMPUS-1",
+        "positionTitle": "大模型后台开发工程师",
+        "projectName": "青云计划-应届生",
+        "recruitLabelName": "应届毕业生 青云计划",
+        "workCities": "深圳",
+        "bgs": "TEG",
+    }]}}
+    detail_response = {"status": 0, "data": {
+        "postId": "TX-CAMPUS-1",
+        "title": "大模型后台开发工程师",
+        "topicDetail": "负责大模型服务研发",
+        "topicRequirement": "熟悉 Python 与分布式系统",
+        "workCityList": ["深圳"],
+        "tidName": "青云课题",
+    }}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/getProjectMapping"):
+            return httpx.Response(200, json=mapping_response)
+        if request.url.path.endswith("/searchPosition"):
+            assert json.loads(request.content)["projectMappingIdList"] == [14]
+            return httpx.Response(200, json=search_response)
+        assert request.url.path.endswith("/getJobDetailsByPostId")
+        return httpx.Response(200, json=detail_response)
+
+    adapter = REGISTRY["tencent"]
+    original_start_url = adapter.start_url
+    adapter.start_url = "https://join.qq.com/post.html?query=p_1"
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            context = CrawlContext(client=client, max_jobs=10)
+            stubs = await adapter.discover(context)
+            payload = await adapter.fetch_detail(stubs[0], context)
+    finally:
+        adapter.start_url = original_start_url
+
+    assert [stub.external_job_id for stub in stubs] == ["TX-CAMPUS-1"]
+    assert payload.application_url == "https://join.qq.com/post_detail.html?postid=TX-CAMPUS-1"
+    assert payload.location == "深圳"
+    assert "熟悉 Python" in payload.description
 
 
 @pytest.mark.asyncio
@@ -230,13 +565,14 @@ def test_live_source_cli_requires_explicit_network_opt_in(monkeypatch, capsys) -
             "tencent",
             {
                 "RecruitPostId": "TX-1",
-                "RecruitPostName": "AI 后端工程师",
+                "RecruitPostName": "AI 后端工程师（2027届校招）",
                 "Responsibility": "建设大模型应用平台",
+                "RecruitTypeName": "校园招聘",
                 "LocationName": "深圳",
-                "PostURL": "https://tencent.wd1.myworkdayjobs.com/zh-CN/Tencent_Careers/job/TX-1",
+                "PostURL": "https://careers.tencent.com/jobdesc.html?postId=TX-1",
             },
             "TX-1",
-            "AI 后端工程师",
+            "AI 后端工程师（2027届校招）",
             "深圳",
         ),
         (

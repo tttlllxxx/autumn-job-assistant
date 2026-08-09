@@ -9,6 +9,8 @@ from app.core.config import Settings
 from app.core.database import Base
 from app.models.entities import CandidateProfile, CostLedger, JobPosting, Recommendation, ResumeDocument, ResumeFact, UserFeedback
 from app.schemas.recommendations import LLMBatchResponse
+from app.schemas.recommendations import FeedbackRequest
+from app.api.recommendations import feedback
 from app.services import recommendations as recommendation_service
 from app.services.recommendations import (
     _request_payload,
@@ -122,6 +124,19 @@ def test_hard_filter_uses_graduation_context_not_unrelated_years(db: Session) ->
     assert hard_filter(wrong_year, profile)[0] is False
 
 
+def test_hard_filter_uses_profile_target_year_and_recruitment_type(db: Session) -> None:
+    profile = add_profile_and_fact(db)
+    profile.target_graduation_year = "2028"
+    profile.target_recruitment_types = ["校园招聘"]
+    target = add_job(db, 1, "RAG 工程师", "负责 Python RAG 平台", "校园招聘", "2028")
+    old = add_job(db, 2, "RAG 工程师", "负责 Python RAG 平台", "校园招聘", "2027")
+    internship = add_job(db, 3, "RAG 工程师", "负责 Python RAG 平台", "日常实习", "2028")
+
+    assert hard_filter(target, profile)[0] is True
+    assert hard_filter(old, profile)[0] is False
+    assert hard_filter(internship, profile)[0] is False
+
+
 def test_hard_filter_reads_recruitment_type_from_description(db: Session) -> None:
     profile = add_profile_and_fact(db)
     social = add_job(db, 1, "RAG 工程师", "这是社会招聘岗位，负责 Python RAG 开发", None, "2027")
@@ -173,6 +188,34 @@ def test_profile_vector_text_does_not_include_internal_fact_ids(db: Session) -> 
 
     assert "fact_test" not in content
     assert "使用 Python 构建课程 RAG 项目" in content
+
+
+def test_manual_qualification_confirmation_updates_latest_recommendation(db: Session) -> None:
+    job = add_job(db, 1, "RAG 工程师", "负责 Python RAG 开发", None, None)
+    recommendation = Recommendation(
+        job_id=job.id,
+        version=3,
+        hard_filter_passed=True,
+        hard_filter_details={},
+        qualification_pending=True,
+        rule_score=10,
+        vector_score=10,
+        final_score=20,
+        rerank_status="local_only",
+        evidence={"pipeline": {"llm": "skipped", "llm_detail": "招聘类型或毕业年份待确认"}},
+    )
+    db.add(recommendation)
+    db.commit()
+
+    result = feedback(job.id, FeedbackRequest(action="confirm_qualification"), db)
+
+    assert result["recommendation_updated"] is True
+    assert job.qualification_confirmed is True
+    assert recommendation.qualification_pending is False
+    assert recommendation.evidence["pipeline"] == {
+        "llm": "pending",
+        "llm_detail": "资格已人工确认，等待更新推荐",
+    }
 
 
 @pytest.mark.asyncio
@@ -354,6 +397,48 @@ async def test_llm_reranks_every_eligible_job_in_small_batches(db: Session, tmp_
     assert batch_sizes == [10, 10, 10, 1]
     assert result["llm_status"] == "completed"
     assert db.query(Recommendation).filter(Recommendation.rerank_status == "completed").count() == len(jobs)
+
+
+@pytest.mark.asyncio
+async def test_llm_reranks_only_local_top_limit(db: Session, tmp_path: Path, monkeypatch) -> None:
+    add_profile_and_fact(db)
+    for number in range(1, 52):
+        add_job(
+            db,
+            number,
+            "RAG 后端工程师",
+            f"使用 Python 开发 RAG 平台，岗位编号 {number}",
+            "校园招聘",
+            "2027",
+        )
+    reranked_ids: list[int] = []
+
+    async def fake_rerank(_db, _settings, _content, _facts, candidates):
+        reranked_ids.extend(job.id for job, _ in candidates)
+        response = LLMBatchResponse.model_validate({
+            "scores": [{
+                "job_id": job.id,
+                "score": 30,
+                "matching_facts": ["Python 项目匹配"],
+                "gaps": [],
+                "risks": [],
+                "jd_quotes": [job.description],
+                "fact_ids": ["fact_test"],
+            } for job, _ in candidates]
+        })
+        return response, 100, 50, 0.0002, "fictional-model", "api"
+
+    monkeypatch.setattr(recommendation_service, "rerank_with_llm", fake_rerank)
+    settings = configured_settings(tmp_path)
+    settings.llm_rerank_limit = 50
+    result = await recompute_recommendations(db, settings, vector_scorer=FakeVectorScorer())
+    skipped = db.scalar(select(Recommendation).where(Recommendation.job_id.not_in(reranked_ids)))
+
+    assert len(reranked_ids) == 50
+    assert result["llm_candidates"] == 50
+    assert skipped is not None
+    assert skipped.rerank_status == "local_only"
+    assert skipped.evidence["pipeline"]["llm_detail"] == "本地初筛未进入 Top 50"
 
 
 @pytest.mark.asyncio

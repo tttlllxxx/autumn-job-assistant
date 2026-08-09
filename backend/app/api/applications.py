@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import get_current_session, require_csrf
-from app.models.entities import Application, AuthSession
+from app.models.entities import Application, AuthSession, JobPosting, utcnow
 from app.schemas.applications import ApplicationInput, ApplicationOut, ApplicationPage, ApplicationPatch
 from app.services.applications_csv import STAGE_RESULT_VALUES, STAGE_VALUES, STATUS_VALUES, export_csv, parse_csv
 
@@ -26,10 +26,15 @@ def list_applications(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     status: str | None = None,
+    job_id: int | None = Query(default=None, ge=1),
     _: AuthSession = Depends(get_current_session),
     db: Session = Depends(get_db),
 ) -> ApplicationPage:
-    filters = [Application.status == status] if status else []
+    filters = []
+    if status:
+        filters.append(Application.status == status)
+    if job_id is not None:
+        filters.append(Application.job_id == job_id)
     total = db.scalar(select(func.count(Application.id)).where(*filters)) or 0
     items = db.scalars(
         select(Application)
@@ -44,7 +49,25 @@ def list_applications(
 @router.post("", response_model=ApplicationOut, dependencies=[Depends(require_csrf)])
 def create_application(payload: ApplicationInput, db: Session = Depends(get_db)) -> Application:
     _validate_enums(payload.status, payload.current_stage, payload.stage_result)
-    item = Application(**payload.model_dump())
+    values = payload.model_dump()
+    if payload.job_id is not None:
+        job = db.get(JobPosting, payload.job_id)
+        if job is None:
+            raise HTTPException(404, "岗位不存在")
+        existing = db.scalar(select(Application).where(Application.job_id == payload.job_id))
+        if existing is not None:
+            raise HTTPException(409, "该岗位已在投递看板中")
+        values.update(
+            company=job.company,
+            position=job.title,
+            position_type=job.recruitment_type or "",
+            department=job.department or "",
+            url=job.normalized_url,
+            base_location=job.location or "",
+        )
+    item = Application(**values)
+    if item.progress_updated_at is None:
+        item.progress_updated_at = utcnow()
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -57,10 +80,15 @@ def update_application(application_id: int, payload: ApplicationPatch, db: Sessi
     if not item:
         raise HTTPException(404, "投递记录不存在")
     changes = payload.model_dump(exclude_unset=True)
+    if "next_action" in changes and changes["next_action"] is None:
+        changes["next_action"] = ""
     status = changes.get("status", item.status)
     stage = changes.get("current_stage", item.current_stage)
     result = changes.get("stage_result", item.stage_result)
     _validate_enums(status, stage, result)
+    progress_fields = {"status", "current_stage", "stage_result", "next_action", "next_action_at"}
+    if progress_fields.intersection(changes) and "progress_updated_at" not in changes:
+        changes["progress_updated_at"] = utcnow()
     for key, value in changes.items():
         setattr(item, key, value)
     if changes:
@@ -68,6 +96,16 @@ def update_application(application_id: int, payload: ApplicationPatch, db: Sessi
     db.commit()
     db.refresh(item)
     return item
+
+
+@router.delete("/{application_id}", dependencies=[Depends(require_csrf)])
+def delete_application(application_id: int, db: Session = Depends(get_db)) -> dict:
+    item = db.get(Application, application_id)
+    if not item:
+        raise HTTPException(404, "投递记录不存在")
+    db.delete(item)
+    db.commit()
+    return {"removed": application_id}
 
 
 @router.post("/import-csv", dependencies=[Depends(require_csrf)])
@@ -103,4 +141,3 @@ def export_applications_csv(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="applications.csv"'},
     )
-

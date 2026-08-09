@@ -8,6 +8,7 @@ from app.core.security import get_current_session, require_csrf
 from app.models.entities import AuthSession, CandidateProfile, ResumeDocument, ResumeFact
 from app.schemas.resumes import FactAction, FactOut, ProfileOut, ProfileUpdate, ResumeOut
 from app.services.resumes import build_profile, create_resume, reparse_document, revise_fact
+from app.services.task_runs import TaskAlreadyRunningError, begin_task, fail_task, finish_task
 
 router = APIRouter(prefix="/api", tags=["简历与画像"])
 
@@ -24,6 +25,10 @@ async def upload_resume(
     if len(content) > settings.max_upload_bytes:
         raise HTTPException(413, f"简历不能超过 {settings.max_upload_bytes // 1024 // 1024} MB")
     try:
+        task = begin_task(db, "resume_parse", message="正在解析简历")
+    except TaskAlreadyRunningError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    try:
         document = create_resume(
             db,
             filename=file.filename,
@@ -31,14 +36,21 @@ async def upload_resume(
             upload_dir=settings.data_dir / "uploads",
         )
     except ValueError as exc:
+        fail_task(db, task.id, exc)
         raise HTTPException(422, str(exc)) from exc
     if document.parse_status != "failed":
         build_profile(db)
-    return db.scalar(
+    result = db.scalar(
         select(ResumeDocument)
         .options(selectinload(ResumeDocument.facts))
         .where(ResumeDocument.id == document.id)
     )
+    assert result is not None
+    if result.parse_status == "failed":
+        fail_task(db, task.id, ValueError(result.parse_error or "简历解析失败"))
+    else:
+        finish_task(db, task.id, {"document_id": result.id, "parse_status": result.parse_status})
+    return result
 
 
 @router.get("/resumes", response_model=list[ResumeOut])

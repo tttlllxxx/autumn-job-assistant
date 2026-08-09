@@ -11,6 +11,7 @@ from app.schemas.recommendations import FeedbackRequest, RecommendationOut, Reco
 from app.services.feishu import notify_eligible
 from app.services.evaluation import evaluate_user_feedback
 from app.services.recommendations import recompute_recommendations
+from app.services.task_runs import TaskAlreadyRunningError, begin_task, fail_task, finish_task
 
 router = APIRouter(prefix="/api", tags=["推荐"])
 
@@ -93,11 +94,20 @@ async def recompute(
     settings: Settings = Depends(get_settings),
 ) -> dict:
     try:
+        task = begin_task(db, "recommendation_recompute", message="正在更新岗位推荐")
+    except TaskAlreadyRunningError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    try:
         result = await recompute_recommendations(db, settings)
         result["notifications"] = await notify_eligible(db, settings)
+        finish_task(db, task.id, result)
         return result
     except ValueError as exc:
+        fail_task(db, task.id, exc)
         raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        fail_task(db, task.id, exc)
+        raise
 
 
 @router.post("/jobs/{job_id}/feedback", dependencies=[Depends(require_csrf)])
@@ -107,8 +117,25 @@ def feedback(job_id: int, payload: FeedbackRequest, db: Session = Depends(get_db
         raise HTTPException(404, "岗位不存在")
     if payload.action == "confirm_qualification":
         job.qualification_confirmed = True
+        version = db.scalar(select(func.max(Recommendation.version)))
+        recommendation = db.scalar(select(Recommendation).where(
+            Recommendation.job_id == job_id,
+            Recommendation.version == version,
+        )) if version is not None else None
+        if recommendation is not None:
+            recommendation.qualification_pending = False
+            evidence = dict(recommendation.evidence or {})
+            pipeline = dict(evidence.get("pipeline") or {})
+            if pipeline.get("llm") == "skipped":
+                pipeline.update(llm="pending", llm_detail="资格已人工确认，等待更新推荐")
+            evidence["pipeline"] = pipeline
+            recommendation.evidence = evidence
         db.commit()
-        return {"job_id": job_id, "qualification_confirmed": True}
+        return {
+            "job_id": job_id,
+            "qualification_confirmed": True,
+            "recommendation_updated": recommendation is not None,
+        }
     if payload.action == "reset_weights":
         for item in db.scalars(select(UserFeedback)).all():
             item.weight_delta = 0

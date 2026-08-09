@@ -50,35 +50,54 @@ describe("关键页面交互", () => {
     );
   });
 
-  it("投递看板展示全部状态并通过 PATCH 更新记录", async () => {
+  it("投递进度表以岗位为行并通过 PATCH 实时更新", async () => {
     localStorage.setItem("csrf_token", "fictional-csrf");
+    let deleted = false;
     const application = {
       id: 1,
+      job_id: 7,
       company: "虚构科技",
       position: "RAG 工程师",
       status: "已投递",
       current_stage: "投递",
       stage_result: "待处理",
       base_location: "北京",
+      next_action: "准备笔试",
+      next_action_at: "2026-08-12T18:00:00",
+      progress_updated_at: "2026-08-09T08:00:00Z",
+      created_at: "2026-08-08T08:00:00Z",
+      channel: "官网",
+      department: "AI 平台",
+      position_type: "校园招聘",
+      applied_date: "2026-08-08",
+      url: "https://jobs.example.invalid/7",
+      contact: "",
+      interview_time: null,
+      referral_code: "",
+      result: "",
       notes: "",
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.startsWith("/api/applications/") && init?.method === "PATCH") {
-        return jsonResponse({ ...application, status: "面试中" });
+        return jsonResponse({ ...application, ...JSON.parse(String(init.body)) });
       }
-      return jsonResponse({ items: [application], total: 1, page: 1, page_size: 200 });
+      if (path === "/api/applications/1" && init?.method === "DELETE") {
+        deleted = true;
+        return jsonResponse({ removed: 1 });
+      }
+      return jsonResponse({ items: deleted ? [] : [application], total: deleted ? 0 : 1, page: 1, page_size: 200 });
     });
     globalThis.fetch = fetchMock as typeof fetch;
 
-    renderWithClient(<Applications />);
-    expect(await screen.findByText("虚构科技")).toBeInTheDocument();
-    expect(screen.getByText("RAG 工程师")).toBeInTheDocument();
-    expect(screen.getByText("已投递 → 投递 · 待处理")).toBeInTheDocument();
+    renderWithClient(<MemoryRouter><Applications /></MemoryRouter>);
+    expect(await screen.findByText("RAG 工程师")).toBeInTheDocument();
+    expect(screen.queryByText(/虚构科技/)).not.toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "下一步行动" })).toBeInTheDocument();
+    expect(screen.getByLabelText("RAG 工程师 当前阶段")).toHaveValue("投递");
+    expect(screen.getByLabelText("RAG 工程师 下一步行动")).toHaveValue("准备笔试");
     expect(screen.queryByLabelText("导入 CSV")).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "导出 CSV" })).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Offer 已接收" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "已终止" })).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("RAG 工程师 状态"), { target: { value: "面试中" } });
     await waitFor(() => {
@@ -93,9 +112,30 @@ describe("关键页面交互", () => {
     });
     const patchCall = fetchMock.mock.calls.find(([, init]) => init?.method === "PATCH");
     expect(new Headers(patchCall?.[1]?.headers).get("X-CSRF-Token")).toBe("fictional-csrf");
+
+    fireEvent.change(screen.getByLabelText("RAG 工程师 下一步行动"), { target: { value: "完成在线测评" } });
+    fireEvent.blur(screen.getByLabelText("RAG 工程师 下一步行动"));
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/applications/1",
+        expect.objectContaining({ method: "PATCH", body: JSON.stringify({ next_action: "完成在线测评" }) }),
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "详情" }));
+    expect(screen.getByText("AI 平台")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "查看岗位详情" })).toHaveAttribute("href", "/jobs/7");
+
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "删除 RAG 工程师" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/applications/1",
+      expect.objectContaining({ method: "DELETE" }),
+    ));
+    await waitFor(() => expect(screen.queryByText("RAG 工程师")).not.toBeInTheDocument());
   });
 
-  it("可在看板内部新建投递并立即渲染", async () => {
+  it("可在进度表内部新建投递并立即渲染", async () => {
     localStorage.setItem("csrf_token", "fictional-csrf");
     const saved = { id: 2, company: "内部创建公司", position: "AI 工程师", status: "待投递", current_stage: "投递", stage_result: "待处理", base_location: "深圳", notes: "", created_at: "2026-08-06T00:00:00Z" };
     let created = false;
@@ -105,15 +145,17 @@ describe("关键页面交互", () => {
     });
     globalThis.fetch = fetchMock as typeof fetch;
 
-    renderWithClient(<Applications />);
-    await screen.findByText("0 个机会");
+    renderWithClient(<MemoryRouter><Applications /></MemoryRouter>);
+    await screen.findByText("全部岗位");
+    expect(screen.getByText("全部岗位").parentElement).toHaveTextContent("0");
     fireEvent.click(screen.getByRole("button", { name: "＋ 新增投递" }));
     fireEvent.change(screen.getByLabelText("公司"), { target: { value: "内部创建公司" } });
     fireEvent.change(screen.getByLabelText("岗位"), { target: { value: "AI 工程师" } });
     fireEvent.change(screen.getByLabelText("地点"), { target: { value: "深圳" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存到看板" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存到进度表" }));
 
-    expect(await screen.findByText("内部创建公司")).toBeInTheDocument();
+    expect(await screen.findByText("AI 工程师")).toBeInTheDocument();
+    expect(screen.queryByText(/内部创建公司/)).not.toBeInTheDocument();
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       "/api/applications",
       expect.objectContaining({ method: "POST", body: expect.stringContaining('"company":"内部创建公司"') }),
@@ -168,6 +210,33 @@ describe("关键页面交互", () => {
       expect.objectContaining({ method: "POST", body: expect.stringContaining("AI 后端工程师") }),
     ));
     expect(await screen.findByText("岗位已保存。")).toBeInTheDocument();
+  });
+
+  it("来源卡片展示有效岗位数和上次发现数", async () => {
+    localStorage.setItem("csrf_token", "fictional-csrf");
+    const source = {
+      source_key: "fictional",
+      display_name: "虚构科技",
+      official_entry: "https://jobs.example.invalid/campus",
+      status: "healthy",
+      last_success_at: "2026-08-09T00:00:00Z",
+      last_run_at: "2026-08-09T00:00:00Z",
+      active_job_count: 12,
+      year_unverified_count: 3,
+      last_discovered_count: 15,
+      consecutive_failures: 0,
+      last_error: null,
+      stable_for_acceptance: false,
+      custom: false,
+    };
+    globalThis.fetch = vi.fn(async () => jsonResponse([source])) as typeof fetch;
+
+    renderWithClient(<Sources />);
+
+    expect(await screen.findByText("12")).toBeInTheDocument();
+    expect(screen.getByText("个有效岗位")).toBeInTheDocument();
+    expect(screen.getByText("上次发现 15 个")).toBeInTheDocument();
+    expect(screen.getByText("其中 3 个岗位的 2027 届资格待确认")).toBeInTheDocument();
   });
 
   it("可查看脱敏 Key 并在不修改 Key 时保存 API 配置", async () => {
@@ -252,6 +321,51 @@ describe("关键页面交互", () => {
       "/api/jobs/1/feedback",
       expect.objectContaining({ method: "POST", body: JSON.stringify({ action: "suitable" }) }),
     ));
+  });
+
+  it("岗位详情已存在投递记录时可跳转到对应进度", async () => {
+    const job = { id: 1, company: "虚构科技", title: "RAG 工程师", location: "上海", description: "岗位原文", normalized_url: "https://example.invalid/jobs/1", closed: false, qualification_confirmed: true, source_key: "manual" };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/jobs/1") return jsonResponse(job);
+      if (path.startsWith("/api/recommendations")) return jsonResponse({ items: [], total: 0, page: 1, page_size: 100 });
+      if (path.startsWith("/api/feedback/weights")) return jsonResponse({ total_weight: 0, limit: 5, suitability: null });
+      if (path === "/api/applications?job_id=1") return jsonResponse({ items: [{ id: 9, job_id: 1 }], total: 1, page: 1, page_size: 50 });
+      return jsonResponse({});
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    renderWithClient(<MemoryRouter initialEntries={["/jobs/1"]}><Routes>
+      <Route path="/jobs/:id" element={<JobDetail />} />
+      <Route path="/applications" element={<h1>对应投递进度</h1>} />
+    </Routes></MemoryRouter>);
+
+    const link = await screen.findByRole("link", { name: "查看投递进度" });
+    expect(link).toHaveAttribute("href", "/applications#application-9");
+    fireEvent.click(link);
+    expect(await screen.findByRole("heading", { name: "对应投递进度" })).toBeInTheDocument();
+  });
+
+  it("人工确认资格后立即移出待确认并显示反馈", async () => {
+    localStorage.setItem("csrf_token", "fictional-csrf");
+    let confirmed = false;
+    const job = { id: 1, company: "虚构科技", title: "RAG 工程师", location: "上海", recruitment_type: null, graduation_year: null, description: "使用 Python 构建 RAG 平台", normalized_url: "https://example.invalid/jobs/1", closed: false, qualification_confirmed: false, source_key: "manual" };
+    const recommendation = { id: 1, job_id: 1, hard_filter_passed: true, hard_filter_details: { open: true }, qualification_pending: true, rule_score: 20, vector_score: 20, llm_score: null, final_score: 40, rerank_status: "local_only", evidence: { pipeline: { llm: "skipped" } }, model_name: null, prompt_version: "v1", scoring_version: "v1" };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/jobs/1/feedback" && init?.method === "POST") { confirmed = true; return jsonResponse({ job_id: 1, qualification_confirmed: true, recommendation_updated: true }); }
+      if (path === "/api/jobs/1") return jsonResponse({ ...job, qualification_confirmed: confirmed });
+      if (path.startsWith("/api/recommendations")) return jsonResponse({ items: [{ ...recommendation, qualification_pending: !confirmed }], total: 1, page: 1, page_size: 100 });
+      if (path.startsWith("/api/feedback/weights")) return jsonResponse({ total_weight: 0, limit: 5, suitability: null });
+      return jsonResponse({});
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    renderWithClient(<MemoryRouter initialEntries={["/jobs/1"]}><Routes><Route path="/jobs/:id" element={<JobDetail />} /></Routes></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: "我已人工确认资格" }));
+
+    expect(await screen.findByText("资格已确认，岗位已移入推荐；更新推荐后会补充模型重排。")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "我已人工确认资格" })).not.toBeInTheDocument());
   });
 
   it("推荐列表直接使用随推荐返回的岗位详情并切换状态", async () => {
@@ -344,6 +458,34 @@ describe("关键页面交互", () => {
       "/api/sources/custom",
       expect.objectContaining({ method: "POST", body: JSON.stringify({ company: "虚构公司", official_entry: "https://careers.example.invalid/jobs" }) }),
     );
+  });
+
+  it("数据来源可修改官方入口并立即重新解析", async () => {
+    localStorage.setItem("csrf_token", "fictional-csrf");
+    let officialEntry = "https://careers.example.invalid/old";
+    const source = { source_key: "custom_fictional", display_name: "虚构公司", official_entry: officialEntry, status: "healthy", last_success_at: null, last_run_at: null, consecutive_failures: 0, last_error: null, stable_for_acceptance: true, custom: true };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/sources/custom_fictional" && init?.method === "PATCH") {
+        officialEntry = String(JSON.parse(String(init.body)).official_entry);
+        return jsonResponse({ success: true, discovered: 5, new: 2, updated: 1, error: null });
+      }
+      if (path === "/api/sources") return jsonResponse([{ ...source, official_entry: officialEntry }]);
+      return jsonResponse({});
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    renderWithClient(<Sources />);
+    fireEvent.click(await screen.findByRole("button", { name: "修改官方入口" }));
+    fireEvent.change(screen.getByLabelText("虚构公司 官方入口"), { target: { value: "https://careers.example.invalid/new" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存并重新解析" }));
+
+    expect(await screen.findByText("官方入口已更新并解析完成：发现 5 个岗位，新增 2 个。")).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/sources/custom_fictional",
+      expect.objectContaining({ method: "PATCH", body: JSON.stringify({ official_entry: "https://careers.example.invalid/new" }) }),
+    ));
+    expect(await screen.findByRole("link", { name: "官方入口" })).toHaveAttribute("href", "https://careers.example.invalid/new");
   });
 
   it("修改方案只从岗位详情生成并进入 06 栏显示修改后示例", async () => {

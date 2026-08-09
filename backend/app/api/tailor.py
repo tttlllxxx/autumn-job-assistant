@@ -12,6 +12,7 @@ from app.models.entities import AuthSession, JobPosting, Recommendation, ResumeV
 from app.schemas.jobs import JobOut
 from app.schemas.tailor import ResumeVersionOut, TailorAdviceOut, TailorAdviceSummaryOut, TailorRequest
 from app.services.tailor import create_tailored_resume, save_tailor_advice, stored_tailor_advice
+from app.services.task_runs import TaskAlreadyRunningError, begin_task, fail_task, finish_task
 
 router = APIRouter(prefix="/api", tags=["定制简历"])
 
@@ -49,9 +50,22 @@ async def generate_tailor_advice(
     if not job or job.closed:
         raise HTTPException(404, "岗位不存在或已关闭")
     try:
+        task = begin_task(db, "tailor_advice", scope_key=str(job_id), total=1, message="正在生成岗位修改方案")
+    except TaskAlreadyRunningError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    try:
         advice = await save_tailor_advice(db, job, settings)
     except ValueError as exc:
+        fail_task(db, task.id, exc)
         raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        fail_task(db, task.id, exc)
+        raise
+    finish_task(
+        db,
+        task.id,
+        {"job_id": job_id, "suggestion_count": len(advice.get("suggestions", []))},
+    )
     return {**advice, "job": JobOut.model_validate(job).model_dump()}
 
 

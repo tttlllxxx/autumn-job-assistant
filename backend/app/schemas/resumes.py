@@ -35,6 +35,8 @@ class ProfileUpdate(BaseModel):
     experience_summary: str | None = None
     project_summary: str | None = None
     target_cities: list[str] | None = None
+    target_graduation_year: str | None = Field(default=None, pattern=r"^20\d{2}$")
+    target_recruitment_types: list[str] | None = None
     remote_preference: str | None = None
     exclude_keywords: list[str] | None = None
 
@@ -50,4 +52,3 @@ class ProfileOut(ProfileUpdate):
 class FactAction(BaseModel):
     action: str = Field(pattern="^(confirm|disable|revise)$")
     text: str | None = Field(default=None, max_length=1000)
-

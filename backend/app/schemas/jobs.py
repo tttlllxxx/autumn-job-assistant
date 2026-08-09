@@ -53,3 +53,7 @@ class SourceRunRequest(BaseModel):
 class CustomSourceCreate(BaseModel):
     company: str = Field(min_length=1, max_length=100)
     official_entry: HttpUrl
+
+
+class SourceUpdate(BaseModel):
+    official_entry: HttpUrl

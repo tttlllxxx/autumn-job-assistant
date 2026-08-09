@@ -2,17 +2,23 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections import Counter
 from datetime import UTC, datetime
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.entities import JobPosting, SourceHealth, SourceRun
+from app.core.target_policy import TARGET_POLICY, TargetPolicy
+from app.models.entities import CandidateProfile, JobPosting, SourceHealth, SourceRun
 from app.sources.base import CrawlContext, JobPayload, normalize_url
 from app.sources.registry import REGISTRY, get_registry
 
 USER_AGENT = "AutumnJobAssistant/0.1 (single-user personal job search)"
+
+
+def _payload_rejection_reason(payload: JobPayload, policy: TargetPolicy = TARGET_POLICY) -> str | None:
+    return policy.source_rejection_reason(payload.title, payload.description)
 
 
 def _upsert_job(db: Session, source_key: str, company: str, payload: JobPayload) -> tuple[JobPosting, bool]:
@@ -66,11 +72,18 @@ def _upsert_job(db: Session, source_key: str, company: str, payload: JobPayload)
 
 
 async def run_source(db: Session, source_key: str, *, allow_browser: bool = False, max_jobs: int = 100) -> SourceRun:
-    adapter = REGISTRY.get(source_key) or get_registry(db)[source_key]
+    adapter = get_registry(db)[source_key]
     run = SourceRun(source_key=source_key, adapter_version=adapter.parser_version)
     db.add(run)
     db.commit()
     seen_ids: set[str] = set()
+    rejection_reasons: Counter[str] = Counter()
+    profile = db.get(CandidateProfile, 1)
+    policy = (
+        TargetPolicy(graduation_year=profile.target_graduation_year or TARGET_POLICY.graduation_year)
+        if profile
+        else TARGET_POLICY
+    )
     context: CrawlContext | None = None
     try:
         async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}, follow_redirects=True) as client:
@@ -80,15 +93,25 @@ async def run_source(db: Session, source_key: str, *, allow_browser: bool = Fals
             for stub in stubs:
                 try:
                     payload = await adapter.fetch_detail(stub, context)
-                    if not payload.title or not payload.description or not adapter._is_official(payload.application_url):
+                    if not payload.title or not payload.description:
+                        rejection_reasons["字段不完整"] += 1
+                        continue
+                    if not adapter._is_official(payload.application_url):
+                        rejection_reasons["非官方申请链接"] += 1
+                        continue
+                    rejection_reason = _payload_rejection_reason(payload, policy)
+                    if rejection_reason is not None:
+                        rejection_reasons[rejection_reason] += 1
                         continue
                     if payload.external_job_id in seen_ids:
+                        rejection_reasons["重复岗位"] += 1
                         continue
                     _, created = _upsert_job(db, source_key, adapter.display_name, payload)
                     seen_ids.add(payload.external_job_id)
                     run.new_count += int(created)
                     run.updated_count += int(not created)
                 except (httpx.HTTPError, ValueError):
+                    rejection_reasons["详情解析失败"] += 1
                     continue
             if not seen_ids:
                 raise ValueError("未采集到字段完整的有效岗位")
@@ -121,6 +144,9 @@ async def run_source(db: Session, source_key: str, *, allow_browser: bool = Fals
         health.last_error = f"{type(exc).__name__}: {str(exc)[:300]}"
         db.add(health)
     run.finished_at = datetime.now(UTC)
+    run.accepted_count = len(seen_ids)
+    run.rejected_count = sum(rejection_reasons.values())
+    run.rejection_reasons = dict(rejection_reasons)
     if context is not None:
         run.request_count = context.request_count
         run.encountered_auth = context.encountered_auth

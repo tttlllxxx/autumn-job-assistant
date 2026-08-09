@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ApplicationInput(BaseModel):
+    job_id: int | None = Field(default=None, ge=1)
     company: str = ""
     channel: str = ""
     position: str = ""
@@ -15,6 +16,8 @@ class ApplicationInput(BaseModel):
     status: str = "待投递"
     current_stage: str = "投递"
     stage_result: str = "待处理"
+    next_action: str = Field(default="", max_length=500)
+    next_action_at: datetime | None = None
     progress_updated_at: datetime | None = None
     referral_code: str = ""
     contact: str = ""
@@ -35,6 +38,8 @@ class ApplicationPatch(BaseModel):
     status: str | None = None
     current_stage: str | None = None
     stage_result: str | None = None
+    next_action: str | None = Field(default=None, max_length=500)
+    next_action_at: datetime | None = None
     progress_updated_at: datetime | None = None
     referral_code: str | None = None
     contact: str | None = None
@@ -54,4 +59,3 @@ class ApplicationPage(BaseModel):
     total: int
     page: int
     page_size: int
-

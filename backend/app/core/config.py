@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     llm_input_price_rmb_per_million: float | None = Field(default=None, ge=0)
     llm_output_price_rmb_per_million: float | None = Field(default=None, ge=0)
     llm_monthly_budget_rmb: float = Field(default=50, ge=0)
+    llm_rerank_limit: int = Field(default=50, ge=1, le=200)
     codex_command: str = "codex"
     codex_model: str | None = None
     codex_timeout_seconds: int = Field(default=300, ge=30, le=600)

@@ -30,6 +30,8 @@ class CandidateProfile(Base):
     experience_summary: Mapped[str] = mapped_column(Text, default="")
     project_summary: Mapped[str] = mapped_column(Text, default="")
     target_cities: Mapped[list[str]] = mapped_column(JSON, default=list)
+    target_graduation_year: Mapped[str] = mapped_column(String(4), default="2027")
+    target_recruitment_types: Mapped[list[str]] = mapped_column(JSON, default=lambda: ["校园招聘"])
     remote_preference: Mapped[str | None] = mapped_column(String(50))
     exclude_keywords: Mapped[list[str]] = mapped_column(JSON, default=list)
     confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -105,6 +107,9 @@ class SourceRun(Base):
     success: Mapped[bool] = mapped_column(Boolean, default=False)
     request_count: Mapped[int] = mapped_column(Integer, default=0)
     discovered_count: Mapped[int] = mapped_column(Integer, default=0)
+    accepted_count: Mapped[int] = mapped_column(Integer, default=0)
+    rejected_count: Mapped[int] = mapped_column(Integer, default=0)
+    rejection_reasons: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)
     new_count: Mapped[int] = mapped_column(Integer, default=0)
     updated_count: Mapped[int] = mapped_column(Integer, default=0)
     error_type: Mapped[str | None] = mapped_column(String(100))
@@ -159,6 +164,7 @@ class RecommendationEvidence(Base):
 class Application(Base):
     __tablename__ = "applications"
     id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[int | None] = mapped_column(ForeignKey("job_postings.id"), index=True)
     company: Mapped[str] = mapped_column(String(255), default="")
     channel: Mapped[str] = mapped_column(String(255), default="")
     position: Mapped[str] = mapped_column(String(255), default="")
@@ -170,6 +176,8 @@ class Application(Base):
     status: Mapped[str] = mapped_column(String(50), default="待投递")
     current_stage: Mapped[str] = mapped_column(String(50), default="投递")
     stage_result: Mapped[str] = mapped_column(String(50), default="待处理")
+    next_action: Mapped[str] = mapped_column(String(500), default="")
+    next_action_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     progress_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     referral_code: Mapped[str] = mapped_column(String(255), default="")
     contact: Mapped[str] = mapped_column(String(255), default="")
@@ -178,6 +186,21 @@ class Application(Base):
     notes: Mapped[str] = mapped_column(Text, default="")
     raw_values: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TaskRun(Base):
+    __tablename__ = "task_runs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_type: Mapped[str] = mapped_column(String(80), index=True)
+    scope_key: Mapped[str | None] = mapped_column(String(255), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="running", index=True)
+    current: Mapped[int] = mapped_column(Integer, default=0)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    message: Mapped[str] = mapped_column(String(500), default="")
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error_message: Mapped[str | None] = mapped_column(String(500))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ResumeVersion(Base):

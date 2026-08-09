@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlencode, urlparse
 
 import httpx
 
-from app.sources.base import CrawlContext, JobPayload, JobStub, OfficialSourceAdapter
+from app.sources.base import CrawlContext, JobPayload, JobStub, OfficialSourceAdapter, normalize_url
 
 
 class PublicJsonSourceAdapter(OfficialSourceAdapter):
+    collection_method = "官方 API"
+
     async def _post_json(self, context: CrawlContext, url: str, data: dict[str, Any]) -> dict[str, Any]:
         last_error: Exception | None = None
         for attempt in range(3):
@@ -31,6 +35,227 @@ class PublicJsonSourceAdapter(OfficialSourceAdapter):
                     await asyncio.sleep(0.25 * (2**attempt))
         assert last_error is not None
         raise last_error
+
+
+class TencentSourceAdapter(PublicJsonSourceAdapter):
+    """Tencent campus jobs only; the global Workday feed is out of scope."""
+
+    parser_version = "2.0"
+    mapping_api_url = "https://join.qq.com/api/v1/position/getProjectMapping"
+    search_api_url = "https://join.qq.com/api/v1/position/searchPosition"
+    detail_api_url = "https://join.qq.com/api/v1/jobDetails/getJobDetailsByPostId"
+    legacy_api_url = "https://careers.tencent.com/tencentcareer/api/post/Query"
+    detail_url = "https://join.qq.com/post_detail.html?postid={id}"
+    target_markers = ("2027", "27届")
+    campus_markers = ("校园", "校招", "应届", "毕业生", "实习")
+    foreign_markers = (
+        "united states", "california", "palo alto", "los angeles", "new york",
+        "singapore", "canada", "japan", "korea", "美国", "加拿大", "新加坡", "日本", "韩国",
+    )
+
+    def _is_target_record(self, data: dict[str, Any], detail_url: str = "") -> bool:
+        raw_url = str(self._first(data, self.url_keys) or detail_url).casefold()
+        if "myworkdayjobs.com" in raw_url:
+            return False
+        text = json.dumps(data, ensure_ascii=False, default=str).casefold()
+        location = str(
+            self._first(data, ("LocationName", "workCities", "workCityList", "location")) or ""
+        ).casefold()
+        if any(marker in location for marker in self.foreign_markers):
+            return False
+        return any(marker in text for marker in self.target_markers) and any(
+            marker in text for marker in self.campus_markers
+        )
+
+    def _stub_from_object(self, data: dict[str, Any]) -> JobStub | None:
+        stub = super()._stub_from_object(data)
+        if stub is None or not self._is_target_record(data, stub.detail_url):
+            return None
+        return stub
+
+    def _api_stub(self, data: dict[str, Any]) -> JobStub | None:
+        if not self._is_target_record(data):
+            return None
+        job_id = str(self._first(data, self.id_keys) or "").strip()
+        title = str(self._first(data, self.title_keys) or "").strip()
+        if not job_id or not title:
+            return None
+        url = normalize_url(self.detail_url.format(id=job_id))
+        return JobStub(job_id, url, title, data)
+
+    @staticmethod
+    def _target_project_mappings(groups: list[Any]) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            for project in group.get("subProjectList") or []:
+                if not isinstance(project, dict):
+                    continue
+                project_name = str(project.get("projectName") or "")
+                is_graduate_project = int(project.get("recruitType") or 0) == 1 or "应届生" in project_name
+                if not is_graduate_project or "实习" in project_name:
+                    continue
+                target_text = " ".join(str(project.get(key) or "") for key in (
+                    "recruitYear", "projectName", "recruitRangDesc",
+                ))
+                if "2027" in target_text and project.get("mappingId") is not None:
+                    results.append(project)
+        return results
+
+    async def _discover_join_api(self, context: CrawlContext) -> list[JobStub]:
+        mapping_response = await self._get(context, self.mapping_api_url)
+        mapping_payload = mapping_response.json()
+        projects = self._target_project_mappings(mapping_payload.get("data") or [])
+        results: dict[str, JobStub] = {}
+        page_size = min(context.max_jobs, 100)
+        for project in projects:
+            page = 1
+            while len(results) < context.max_jobs:
+                payload = await self._post_json(context, self.search_api_url, {
+                    "projectIdList": [],
+                    "projectMappingIdList": [project["mappingId"]],
+                    "keyword": "",
+                    "bgList": [],
+                    "workCountryType": 0,
+                    "workCityList": [],
+                    "recruitCityList": [],
+                    "positionFidList": [],
+                    "pageIndex": page,
+                    "pageSize": page_size,
+                })
+                data = payload.get("data") or {}
+                items = data.get("positionList") or []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    job_id = str(item.get("postId") or "").strip()
+                    title = str(item.get("positionTitle") or "").strip()
+                    if not job_id or not title:
+                        continue
+                    raw = {
+                        **item,
+                        "_target_graduation_year": "2027",
+                        "_target_recruitment_type": str(project.get("projectName") or "校园招聘"),
+                    }
+                    url = normalize_url(self.detail_url.format(id=job_id))
+                    results[job_id] = JobStub(job_id, url, title, raw)
+                    if len(results) >= context.max_jobs:
+                        break
+                total = int(data.get("count") or len(items))
+                if not items or page * page_size >= total:
+                    break
+                page += 1
+        return list(results.values())
+
+    async def _discover_legacy_api(self, context: CrawlContext) -> list[JobStub]:
+        results: dict[str, JobStub] = {}
+        page_size = min(context.max_jobs, 100)
+        for keyword in self.target_markers:
+            page = 1
+            while len(results) < context.max_jobs:
+                query = urlencode({
+                    "keyword": keyword,
+                    "pageIndex": page,
+                    "pageSize": page_size,
+                    "language": "zh-cn",
+                    "area": "cn",
+                })
+                response = await self._get(context, f"{self.legacy_api_url}?{query}")
+                payload = response.json()
+                data = payload.get("Data") or payload.get("data") or {}
+                items = data.get("Posts") or data.get("posts") or []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    stub = self._api_stub(item)
+                    if stub is not None:
+                        results[stub.external_job_id] = stub
+                        if len(results) >= context.max_jobs:
+                            break
+                total = int(data.get("Count") or data.get("count") or len(items))
+                if not items or page * page_size >= total:
+                    break
+                page += 1
+        return list(results.values())
+
+    async def discover(self, context: CrawlContext) -> list[JobStub]:
+        errors: list[Exception] = []
+        if urlparse(self.start_url).hostname == "join.qq.com":
+            try:
+                jobs = await self._discover_join_api(context)
+                if jobs:
+                    return jobs[: context.max_jobs]
+            except Exception as exc:
+                errors.append(exc)
+        try:
+            page_jobs = await super().discover(context)
+            if page_jobs:
+                return page_jobs[: context.max_jobs]
+        except Exception as exc:
+            errors.append(exc)
+        try:
+            return (await self._discover_legacy_api(context))[: context.max_jobs]
+        except Exception as exc:
+            errors.append(exc)
+        if errors:
+            raise errors[-1]
+        return []
+
+    def _payload_from_raw(self, stub: JobStub) -> JobPayload | None:
+        data = stub.raw
+        if not data or not self._is_target_record(data, stub.detail_url):
+            return None
+        title = str(self._first(data, self.title_keys) or stub.title_hint).strip()
+        duties = str(
+            self._first(data, ("desc", "topicDetail", "Responsibility", "responsibility", "description")) or ""
+        ).strip()
+        requirements = str(
+            self._first(
+                data,
+                ("request", "topicRequirement", "Requirement", "Qualification", "requirement", "qualification"),
+            ) or ""
+        ).strip()
+        if not title or not (duties or requirements):
+            return None
+        description = "\n\n".join(
+            part for part in (
+                f"工作职责\n{duties}" if duties else "",
+                f"任职要求\n{requirements}" if requirements else "",
+            ) if part
+        )
+        return JobPayload(
+            external_job_id=stub.external_job_id,
+            title=title,
+            department=str(self._first(data, ("tidName", "bgs", *self.department_keys)) or "") or None,
+            location=str(self._first(data, ("workCityList", "workCities", *self.location_keys)) or "") or None,
+            recruitment_type=str(
+                data.get("_target_recruitment_type") or data.get("recruitLabelName") or "校园招聘"
+            ),
+            graduation_year="2027",
+            description=description,
+            application_url=stub.detail_url,
+            evidence_metadata={"source_url": self.detail_api_url, "parser_version": self.parser_version},
+        )
+
+    async def fetch_detail(self, stub: JobStub, context: CrawlContext) -> JobPayload:
+        payload = self._payload_from_raw(stub)
+        if payload is None and stub.raw.get("_target_graduation_year") == "2027":
+            query = urlencode({"postId": stub.external_job_id})
+            response = await self._get(context, f"{self.detail_api_url}?{query}")
+            body = response.json()
+            detail = body.get("data") or {}
+            if isinstance(detail, dict):
+                raw = {**stub.raw, **detail}
+                payload = self._payload_from_raw(JobStub(
+                    stub.external_job_id,
+                    stub.detail_url,
+                    stub.title_hint,
+                    raw,
+                ))
+        if payload is None:
+            raise ValueError("腾讯岗位不是中国区 2027 届校园招聘岗位，或正文不完整")
+        return payload
 
 
 class AntSourceAdapter(PublicJsonSourceAdapter):

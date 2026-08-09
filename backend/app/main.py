@@ -12,11 +12,12 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import applications, auth, backups, health, jobs, recommendations, resumes, settings, sources, tailor
+from app.api import applications, auth, backups, health, jobs, recommendations, resumes, settings, sources, tailor, tasks
 from app.core.config import get_settings
 from app.core.database import Base, SessionLocal, engine
 from app.core.security import configure_logging, initialize_admin
 from app.services.daily import run_daily_pipeline
+from app.services.task_runs import interrupt_running_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ async def lifespan(_: FastAPI):
     Base.metadata.create_all(engine)
     with SessionLocal() as db:
         initialize_admin(db, settings)
+        interrupt_running_tasks(db)
     scheduler = AsyncIOScheduler(timezone=settings.schedule_timezone)
     scheduler.add_job(
         run_daily_pipeline,
@@ -55,6 +57,7 @@ app.include_router(settings.router)
 app.include_router(tailor.router)
 app.include_router(applications.router)
 app.include_router(backups.router)
+app.include_router(tasks.router)
 
 
 @app.exception_handler(HTTPException)

@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
+from app.core.target_policy import TARGET_POLICY
 from app.models.entities import CandidateProfile, CostLedger, JobPosting, Recommendation, ResumeFact, UserFeedback
 from app.schemas.recommendations import LLMBatchResponse
 from app.services.llm import (
@@ -38,7 +39,6 @@ DIRECTION_ALIAS_GROUPS = (
     (("云原生", "基础架构"), ("云原生", "基础架构", "infra", "kubernetes")),
     (("测试开发",), ("测试开发", "测开", "自动化测试")),
 )
-EXCLUDED_RECRUITMENT = ("社招", "社会招聘", "日常实习", "暑期实习")
 PROMPT_VERSION = "rerank-v3"
 SCORING_VERSION = "rule-vector-llm-v3"
 LLM_BATCH_SIZE = 10
@@ -110,18 +110,41 @@ def _graduation_years(job: JobPosting) -> set[str]:
     return {year for pattern in patterns for year in re.findall(pattern, text)}
 
 
+def _matches_recruitment_target(text: str, targets: list[str]) -> bool:
+    aliases = {
+        "校园招聘": ("校园招聘", "校招", "校园"),
+        "秋季招聘": ("秋季招聘", "秋招"),
+        "春季招聘": ("春季招聘", "春招"),
+        "实习": ("实习",),
+    }
+    return not targets or any(
+        any(_contains_term(text, alias) for alias in aliases.get(target, (target,)))
+        for target in targets
+    )
+
+
 def hard_filter(job: JobPosting, profile: CandidateProfile) -> tuple[bool, bool, dict]:
     text = f"{job.title}\n{job.recruitment_type or ''}\n{job.graduation_year or ''}\n{job.description}".lower()
     qualification_text = text
     graduation_years = _graduation_years(job)
+    target_year = profile.target_graduation_year or TARGET_POLICY.graduation_year
+    recruitment_known = any(
+        term in qualification_text
+        for term in ("校招", "校园", "秋招", "春招", "实习", *TARGET_POLICY.excluded_recruitment)
+    )
     checks = {
         "open": not job.closed,
-        "recruitment_type": not any(_contains_term(qualification_text, term) for term in EXCLUDED_RECRUITMENT),
-        "graduation_year": not graduation_years or "2027" in graduation_years,
+        "recruitment_type": (
+            not any(_contains_term(qualification_text, term) for term in TARGET_POLICY.excluded_recruitment)
+            and (not recruitment_known or _matches_recruitment_target(
+                qualification_text,
+                profile.target_recruitment_types,
+            ))
+        ),
+        "graduation_year": not graduation_years or target_year in graduation_years,
         "excluded_keywords": not any(_contains_term(text, term) for term in profile.exclude_keywords),
         "technical_direction": any(_contains_term(text, term) for term in TARGET_TERMS),
     }
-    recruitment_known = any(term in qualification_text for term in ("校招", "校园", *EXCLUDED_RECRUITMENT))
     year_known = bool(graduation_years)
     qualification_pending = not job.qualification_confirmed and not (recruitment_known and year_known)
     return all(checks.values()), qualification_pending, checks
@@ -354,10 +377,17 @@ async def recompute_recommendations(
             vector_detail=vector_status,
         )
     db.commit()
-    candidates = sorted(
+    ranked_candidates = sorted(
         (item for item in eligible if not item[1].qualification_pending),
         key=lambda item: (-item[1].final_score, item[0].id),
     )
+    candidates = ranked_candidates[: settings.llm_rerank_limit]
+    for _, recommendation in ranked_candidates[settings.llm_rerank_limit :]:
+        _pipeline_evidence(
+            recommendation,
+            llm="skipped",
+            llm_detail=f"本地初筛未进入 Top {settings.llm_rerank_limit}",
+        )
     for _, recommendation in eligible:
         if recommendation.qualification_pending:
             _pipeline_evidence(recommendation, llm="skipped", llm_detail="招聘类型或毕业年份待确认")
@@ -478,4 +508,6 @@ async def recompute_recommendations(
         "vector_status": vector_status,
         "llm_status": llm_status,
         "llm_provider": provider,
+        "llm_candidates": len(candidates),
+        "llm_limit": settings.llm_rerank_limit,
     }

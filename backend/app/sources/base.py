@@ -78,6 +78,7 @@ def normalize_url(url: str) -> str:
 
 class OfficialSourceAdapter:
     parser_version = "1.1"
+    collection_method = "官方网页"
     title_keys = (
         "title", "jobName", "positionName", "name", "postName", "RecruitPostName", "externalJobName", "jobname",
     )

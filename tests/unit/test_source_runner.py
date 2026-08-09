@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.core.database import Base
 from app.models.entities import JobPosting, SourceHealth
 from app.sources.base import JobPayload, JobStub
-from app.sources.runner import _upsert_job, run_source
+from app.sources.runner import _payload_rejection_reason, _upsert_job, run_source
 from app.sources import runner
 
 
@@ -21,6 +21,31 @@ def payload(job_id: str, title: str, *, url: str, shared: bool, description: str
         application_url=url,
         evidence_metadata={"shared_listing_url": shared},
     )
+
+
+@pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        ("隐私协议", "https://example.invalid/privacy"),
+        ("美团赛事", "这是一段活动介绍，不是具体岗位的职责和任职要求"),
+        ("Eagle Program", "这是一段招聘项目介绍，不是具体岗位的职责和任职要求"),
+        ("携程集团2026年春季校园招聘全球启动", "这是一段旧批次介绍，不是 2027 届岗位"),
+        ("大住宿全球培训生AGT", '<p><a href="/campaign"><img src="poster.jpg"></a></p>'),
+    ],
+)
+def test_non_job_payloads_are_rejected(title: str, description: str) -> None:
+    item = payload("BAD", title, url="https://jobs.example.invalid/jobs/BAD", shared=False, description=description)
+
+    assert _payload_rejection_reason(item) is not None
+
+
+def test_concrete_job_payload_is_not_rejected() -> None:
+    item = payload(
+        "GOOD", "RAG 后端开发工程师", url="https://jobs.example.invalid/jobs/GOOD", shared=False,
+        description="负责检索增强服务开发；要求熟悉 Python、数据库和分布式系统。",
+    )
+
+    assert _payload_rejection_reason(item) is None
 
 
 def test_shared_listing_keeps_distinct_external_jobs_and_same_id_updates() -> None:
@@ -98,6 +123,37 @@ class FixtureAdapter:
 async def run_fixture(db: Session, monkeypatch, adapter: FixtureAdapter):
     monkeypatch.setitem(runner.REGISTRY, "fixture", adapter)
     return await run_source(db, "fixture")
+
+
+@pytest.mark.asyncio
+async def test_run_source_uses_database_aware_registry(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    selected = FixtureAdapter([
+        payload("J1", "虚构 RAG 工程师", url="https://jobs.example.invalid/jobs/1", shared=False)
+    ])
+    monkeypatch.setitem(runner.REGISTRY, "fixture", FixtureAdapter(fail=True))
+    monkeypatch.setattr(runner, "get_registry", lambda _db: {"fixture": selected})
+
+    with Session(engine) as db:
+        run = await run_source(db, "fixture")
+
+    assert run.success is True
+
+
+@pytest.mark.asyncio
+async def test_source_run_records_accepted_and_rejected_funnel(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    valid = payload("J1", "虚构 RAG 工程师", url="https://jobs.example.invalid/jobs/1", shared=False)
+    rejected = payload("J2", "隐私协议", url="https://jobs.example.invalid/privacy", shared=False)
+    with Session(engine) as db:
+        run = await run_fixture(db, monkeypatch, FixtureAdapter([valid, rejected]))
+
+    assert run.discovered_count == 2
+    assert run.accepted_count == 1
+    assert run.rejected_count == 1
+    assert run.rejection_reasons == {"页面导航或隐私条款，不是岗位": 1}
 
 
 @pytest.mark.asyncio
