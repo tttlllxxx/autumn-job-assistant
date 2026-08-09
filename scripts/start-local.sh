@@ -16,6 +16,7 @@ if [[ ! -d frontend/node_modules ]]; then
   npm --prefix frontend ci --no-audit --no-fund
 fi
 
+mkdir -p data/uploads data/generated data/backups data/models
 npm --prefix frontend run build
 .venv/bin/alembic upgrade head
 

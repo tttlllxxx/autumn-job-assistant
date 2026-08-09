@@ -30,7 +30,6 @@ uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -e '.[dev]'
 source .venv/bin/activate
 playwright install chromium
-cp .env.example .env
 npm --prefix frontend ci
 ```
 
