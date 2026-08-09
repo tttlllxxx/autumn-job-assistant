@@ -1,0 +1,45 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_SECRET: ${APP_SECRET:-development-only-change-before-production}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me}
+      DATABASE_URL: sqlite:////data/db/app.db
+      DATA_DIR: /data
+      MODEL_CACHE_DIR: /models
+      SCHEDULE_HOUR: ${SCHEDULE_HOUR:-8}
+      SCHEDULE_TIMEZONE: Asia/Shanghai
+      LLM_PROVIDER: ${LLM_PROVIDER:-auto}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_INPUT_PRICE_RMB_PER_MILLION: ${LLM_INPUT_PRICE_RMB_PER_MILLION:-}
+      LLM_OUTPUT_PRICE_RMB_PER_MILLION: ${LLM_OUTPUT_PRICE_RMB_PER_MILLION:-}
+      LLM_MONTHLY_BUDGET_RMB: ${LLM_MONTHLY_BUDGET_RMB:-50}
+      FEISHU_WEBHOOK: ${FEISHU_WEBHOOK:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8000}
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      - database:/data/db
+      - resume_originals:/data/uploads
+      - resume_generated:/data/generated
+      - backups:/data/backups
+      - model_cache:/models
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  database:
+  resume_originals:
+  resume_generated:
+  backups:
+  model_cache:

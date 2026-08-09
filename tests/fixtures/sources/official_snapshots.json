@@ -1,0 +1,95 @@
+{
+  "bytedance": {
+    "id": "BYTE-FICTIONAL-1",
+    "title": "虚构大模型应用工程师",
+    "description": "负责虚构的检索增强应用开发",
+    "location": "北京"
+  },
+  "alibaba": {
+    "positionId": "ALI-FICTIONAL-1",
+    "positionName": "虚构 RAG 工程师",
+    "requirement": "使用虚构数据建设检索系统",
+    "workLocation": "杭州"
+  },
+  "tencent": {
+    "RecruitPostId": "TENCENT-FICTIONAL-1",
+    "RecruitPostName": "虚构 AI 后端工程师",
+    "Responsibility": "建设虚构的智能体后端平台",
+    "LocationName": "深圳",
+    "PostURL": "https://tencent.wd1.myworkdayjobs.com/zh-CN/Tencent_Careers/job/FICTIONAL-1"
+  },
+  "baidu": {
+    "jobId": "BAIDU-FICTIONAL-1",
+    "jobName": "虚构模型安全工程师",
+    "jobDescription": "负责虚构模型的安全评估",
+    "workPlace": "北京"
+  },
+  "meituan": {
+    "jobUnionId": "MEITUAN-FICTIONAL-1",
+    "name": "虚构 AI 平台工程师",
+    "responsibility": "开发虚构的平台服务",
+    "city": "上海"
+  },
+  "xiaohongshu": {
+    "positionId": "XHS-FICTIONAL-1",
+    "positionName": "虚构 Agent 工程师",
+    "jobDescription": "开发虚构的智能体工作流",
+    "workLocation": "上海"
+  },
+  "kuaishou": {
+    "id": "KUAISHOU-FICTIONAL-1",
+    "name": "虚构多模态平台工程师",
+    "description": "建设虚构的多模态服务平台",
+    "workLocation": "北京"
+  },
+  "huawei": {
+    "advertisementId": "HUAWEI-FICTIONAL-ADVERTISEMENT-1",
+    "jobName": "虚构 AI 安全工程师",
+    "jobResponsibilities": "负责虚构安全平台研发",
+    "jobDemand": "熟悉 Python",
+    "jobPlaceName": "上海"
+  },
+  "ant": {
+    "jobCode": "ANT-FICTIONAL-1",
+    "title": "虚构可信 AI 工程师",
+    "content": "建设虚构可信人工智能系统",
+    "workplace": "杭州"
+  },
+  "jd": {
+    "publishId": "JD-FICTIONAL-1",
+    "positionName": "虚构 RAG 后端工程师",
+    "workContent": "研发虚构的检索增强服务",
+    "qualification": "熟悉 Python",
+    "workCity": "北京"
+  },
+  "didi": {
+    "jobId": "DIDI-FICTIONAL-1",
+    "jobName": "虚构安全研发工程师",
+    "description": "开发虚构的安全检测服务",
+    "location": "北京"
+  },
+  "netease": {
+    "positionId": "NETEASE-FICTIONAL-1",
+    "positionName": "虚构 AI 应用工程师",
+    "duty": "开发虚构的游戏智能应用",
+    "city": "广州"
+  },
+  "mihoyo": {
+    "id": "MIHOYO-FICTIONAL-1",
+    "title": "虚构平台研发工程师",
+    "jobSummary": "建设虚构的后端研发平台",
+    "address": "上海"
+  },
+  "bilibili": {
+    "id": "BILIBILI-FICTIONAL-1",
+    "positionName": "虚构模型工程研发工程师【2027届】",
+    "positionDescription": "开发虚构的大模型工程平台",
+    "workLocation": "上海"
+  },
+  "ctrip": {
+    "jobId": "CTRIP-FICTIONAL-1",
+    "jobName": "虚构 AI 后端开发工程师",
+    "description": "建设虚构的旅行智能服务",
+    "workLocation": "上海"
+  }
+}
