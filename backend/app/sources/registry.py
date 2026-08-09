@@ -1,5 +1,14 @@
+from urllib.parse import urlparse
+
+from sqlalchemy.orm import Session
+
+from app.models.entities import AppSetting
 from app.sources.base import OfficialSourceAdapter
 from app.sources.dynamic import AntSourceAdapter, MihoyoSourceAdapter, NeteaseSourceAdapter
+
+
+CUSTOM_SOURCES_KEY = "custom_sources"
+CUSTOM_DETAIL_TOKENS = ("job", "position", "career", "recruit", "campus", "detail", "apply")
 
 
 SOURCE_SPECS = (
@@ -56,3 +65,46 @@ def build_registry() -> dict[str, OfficialSourceAdapter]:
 
 
 REGISTRY = build_registry()
+
+
+def custom_source_configs(db: Session) -> list[dict[str, str]]:
+    setting = db.get(AppSetting, CUSTOM_SOURCES_KEY)
+    if setting is None or not isinstance(setting.value, list):
+        return []
+    return [item for item in setting.value if isinstance(item, dict)]
+
+
+def save_custom_source_configs(db: Session, configs: list[dict[str, str]]) -> None:
+    setting = db.get(AppSetting, CUSTOM_SOURCES_KEY) or AppSetting(
+        key=CUSTOM_SOURCES_KEY,
+        value=[],
+        secret=False,
+    )
+    setting.value = configs
+    db.add(setting)
+    db.commit()
+
+
+def build_custom_adapter(config: dict[str, str]) -> OfficialSourceAdapter:
+    start_url = config["official_entry"]
+    host = urlparse(start_url).hostname
+    if not host:
+        raise ValueError("官方招聘入口缺少有效域名")
+    return OfficialSourceAdapter(
+        source_key=config["source_key"],
+        display_name=config["display_name"],
+        start_url=start_url,
+        allowed_domains=(host,),
+        detail_tokens=CUSTOM_DETAIL_TOKENS,
+    )
+
+
+def get_registry(db: Session) -> dict[str, OfficialSourceAdapter]:
+    combined = dict(REGISTRY)
+    for config in custom_source_configs(db):
+        try:
+            adapter = build_custom_adapter(config)
+        except (KeyError, ValueError):
+            continue
+        combined[adapter.source_key] = adapter
+    return combined

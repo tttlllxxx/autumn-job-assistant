@@ -25,10 +25,77 @@ TARGET_TERMS = (
     "机器学习", "深度学习", "自然语言", "计算机视觉", "数据开发", "前端", "客户端",
     "云原生", "基础架构", "测试开发", "软件开发", "研发工程师",
 )
+DIRECTION_ALIAS_GROUPS = (
+    (("rag", "检索增强"), ("rag", "检索增强", "知识库问答")),
+    (("agent", "智能体"), ("agent", "智能体", "多智能体")),
+    (("前端", "frontend"), ("前端开发", "frontend", "react", "vue", "typescript", "javascript")),
+    (("后端", "backend"), ("后端", "backend", "服务端")),
+    (("算法", "机器学习", "深度学习"), ("算法", "机器学习", "深度学习", "machine learning")),
+    (("自然语言", "nlp"), ("自然语言", "nlp", "文本算法")),
+    (("计算机视觉", "cv"), ("计算机视觉", "computer vision", "图像算法")),
+    (("安全",), ("模型安全", "安全研发", "应用安全", "数据安全", "安全工程")),
+    (("数据开发", "数据工程"), ("数据开发", "数据工程", "数仓", "etl")),
+    (("云原生", "基础架构"), ("云原生", "基础架构", "infra", "kubernetes")),
+    (("测试开发",), ("测试开发", "测开", "自动化测试")),
+)
 EXCLUDED_RECRUITMENT = ("社招", "社会招聘", "日常实习", "暑期实习")
-PROMPT_VERSION = "rerank-v2"
-SCORING_VERSION = "rule-vector-llm-v2"
+PROMPT_VERSION = "rerank-v3"
+SCORING_VERSION = "rule-vector-llm-v3"
 LLM_BATCH_SIZE = 10
+
+
+def _contains_term(text: str, term: str) -> bool:
+    normalized_text = text.lower()
+    normalized_term = term.strip().lower()
+    if not normalized_term:
+        return False
+    if re.fullmatch(r"[a-z0-9][a-z0-9.+#-]*", normalized_term):
+        return bool(re.search(rf"(?<![a-z0-9]){re.escape(normalized_term)}(?![a-z0-9])", normalized_text))
+    return normalized_term in normalized_text
+
+
+def _direction_aliases(direction: str) -> tuple[str, ...]:
+    aliases: list[str] = []
+    if any(_contains_term(direction, marker) for marker in ("大模型", "llm", "aigc")):
+        aliases.extend(
+            ("大模型应用", "llm应用", "llm 应用", "生成式ai应用", "aigc应用", "prompt engineering")
+            if "应用" in direction
+            else ("大模型", "llm", "生成式ai", "生成式人工智能", "aigc")
+        )
+    for markers, terms in DIRECTION_ALIAS_GROUPS:
+        if any(_contains_term(direction, marker) for marker in markers):
+            aliases.extend(terms)
+    if not aliases:
+        simplified = re.sub(r"(?:工程师?|开发|研发|方向|岗位)$", "", direction.strip(), flags=re.IGNORECASE).strip()
+        if simplified:
+            aliases.append(simplified)
+    return tuple(dict.fromkeys(aliases))
+
+
+def _core_direction_text(job: JobPosting) -> str:
+    responsibilities = re.split(
+        r"(?:任职|职位|岗位|工作)(?:资格|要求)|我们希望您|基本要求|资格要求",
+        job.description,
+        maxsplit=1,
+    )[0]
+    return f"{job.title}\n{responsibilities}".lower()
+
+
+def _matched_target_directions(job: JobPosting, profile: CandidateProfile) -> list[str]:
+    text = _core_direction_text(job)
+    hits: list[str] = []
+    for direction in profile.target_directions:
+        aliases = _direction_aliases(direction)
+        matched = any(_contains_term(text, alias) for alias in aliases)
+        if not matched and any(_contains_term(direction, marker) for marker in ("前端", "frontend")):
+            matched = any(_contains_term(job.title, marker) for marker in ("前端", "frontend", "全栈"))
+        if not matched and "应用" in direction and any(
+            _contains_term(direction, marker) for marker in ("大模型", "llm", "aigc")
+        ):
+            matched = any(marker in job.title.lower() for marker in ("ai应用", "人工智能应用", "大模型应用", "llm应用"))
+        if matched:
+            hits.append(direction)
+    return hits
 
 
 def _graduation_years(job: JobPosting) -> set[str]:
@@ -45,14 +112,14 @@ def _graduation_years(job: JobPosting) -> set[str]:
 
 def hard_filter(job: JobPosting, profile: CandidateProfile) -> tuple[bool, bool, dict]:
     text = f"{job.title}\n{job.recruitment_type or ''}\n{job.graduation_year or ''}\n{job.description}".lower()
-    qualification_text = f"{job.title}\n{job.recruitment_type or ''}\n{job.graduation_year or ''}".lower()
+    qualification_text = text
     graduation_years = _graduation_years(job)
     checks = {
         "open": not job.closed,
-        "recruitment_type": not any(term in qualification_text for term in EXCLUDED_RECRUITMENT),
+        "recruitment_type": not any(_contains_term(qualification_text, term) for term in EXCLUDED_RECRUITMENT),
         "graduation_year": not graduation_years or "2027" in graduation_years,
-        "excluded_keywords": not any(term.lower() in text for term in profile.exclude_keywords),
-        "technical_direction": any(term in text for term in TARGET_TERMS),
+        "excluded_keywords": not any(_contains_term(text, term) for term in profile.exclude_keywords),
+        "technical_direction": any(_contains_term(text, term) for term in TARGET_TERMS),
     }
     recruitment_known = any(term in qualification_text for term in ("校招", "校园", *EXCLUDED_RECRUITMENT))
     year_known = bool(graduation_years)
@@ -62,9 +129,9 @@ def hard_filter(job: JobPosting, profile: CandidateProfile) -> tuple[bool, bool,
 
 def rule_score(job: JobPosting, profile: CandidateProfile) -> tuple[float, dict]:
     text = f"{job.title}\n{job.description}".lower()
-    direction_hits = [term for term in TARGET_TERMS if term in text]
-    direction = min(15.0, len(direction_hits) * 3.0)
-    skill_hits = [skill for skill in profile.skills if skill.lower() in text]
+    direction_hits = _matched_target_directions(job, profile)
+    direction = min(15.0, len(direction_hits) * 5.0)
+    skill_hits = [skill for skill in profile.skills if _contains_term(text, skill)]
     skills = min(10.0, len(skill_hits) * 2.0)
     location = 0.0
     if profile.target_cities:
@@ -111,7 +178,7 @@ def profile_text(db: Session, profile: CandidateProfile) -> tuple[str, list[Resu
             "目标方向：" + "、".join(profile.target_directions),
             "技能：" + "、".join(profile.skills),
             "目标城市：" + "、".join(profile.target_cities),
-            *[f"[{fact.fact_id}] {fact.redacted_text}" for fact in facts],
+            *[fact.redacted_text for fact in facts],
         ]
     )
     return text, list(facts)
@@ -126,7 +193,10 @@ def _request_payload(profile_content: str, facts: list[ResumeFact], candidates: 
         "fact_ids 字段才用于填写内部事实标识。"
         "matching_facts、gaps、risks、jd_quotes、fact_ids 必须始终输出 JSON 数组，即使只有一项。"
         "每个岗位最多输出 3 条 matching_facts、2 条 gaps、2 条 risks、2 条 jd_quotes 和 3 个 fact_ids；"
-        "每条理由不超过 80 个中文字。"
+        "每条理由不超过 80 个中文字。评分必须独立判断，不参考任何已有本地分数："
+        "0-10 表示仅有偶然关键词或方向不符，11-20 表示部分相关但核心能力不足，"
+        "21-30 表示方向明确且有可验证经历，31-36 表示高度匹配，37-40 仅用于核心要求近乎完整匹配且无明显缺口。"
+        "出现核心能力缺口时不得给 37 分以上；不得因 JD 中提到 AI 工具就把非 AI 岗位判为 AI 方向。"
         "只输出 JSON：{\"scores\":[{job_id,score,matching_facts,gaps,risks,jd_quotes,fact_ids}]}。"
     )
     jobs = [
@@ -135,7 +205,6 @@ def _request_payload(profile_content: str, facts: list[ResumeFact], candidates: 
             "title": job.title,
             "company": job.company,
             "jd": f"<UNTRUSTED_JD>{job.description[:6000]}</UNTRUSTED_JD>",
-            "local_score": recommendation.rule_score + recommendation.vector_score,
         }
         for job, recommendation in candidates
     ]
@@ -148,7 +217,15 @@ def _request_payload(profile_content: str, facts: list[ResumeFact], candidates: 
             {
                 "role": "user",
                 "content": json.dumps(
-                    {"redacted_profile": profile_content, "allowed_fact_ids": allowed_fact_ids, "jobs": jobs},
+                    {
+                        "redacted_profile": profile_content,
+                        "profile_facts": [
+                            {"fact_id": fact.fact_id, "text": fact.redacted_text}
+                            for fact in facts
+                        ],
+                        "allowed_fact_ids": allowed_fact_ids,
+                        "jobs": jobs,
+                    },
                     ensure_ascii=False,
                 ),
             },
@@ -196,6 +273,14 @@ def _quote_is_grounded(quote: str, description: str) -> bool:
     normalized_quote = re.sub(r"\s+", "", quote).strip()
     normalized_description = re.sub(r"\s+", "", description)
     return bool(normalized_quote and normalized_quote in normalized_description)
+
+
+def _llm_score_cap(recommendation: Recommendation, fact_count: int, gap_count: int, risk_count: int) -> float:
+    direction_count = len((recommendation.evidence or {}).get("rule", {}).get("direction_hits", []))
+    direction_cap = 20.0 if direction_count == 0 else 34.0 if direction_count == 1 else 40.0
+    evidence_cap = min(40.0, 24.0 + 6.0 * min(fact_count, 3))
+    penalty = min(16.0, gap_count * 4.0 + risk_count * 3.0)
+    return max(0.0, min(direction_cap, evidence_cap) - penalty)
 
 
 async def recompute_recommendations(
@@ -269,7 +354,14 @@ async def recompute_recommendations(
             vector_detail=vector_status,
         )
     db.commit()
-    candidates = sorted(eligible, key=lambda item: (-item[1].final_score, item[0].id))
+    candidates = sorted(
+        (item for item in eligible if not item[1].qualification_pending),
+        key=lambda item: (-item[1].final_score, item[0].id),
+    )
+    for _, recommendation in eligible:
+        if recommendation.qualification_pending:
+            _pipeline_evidence(recommendation, llm="skipped", llm_detail="招聘类型或毕业年份待确认")
+    db.commit()
     available, llm_reason = llm_available(settings, db)
     provider = selected_provider(settings, db)
     llm_status = "disabled"
@@ -297,29 +389,41 @@ async def recompute_recommendations(
                     grounded_quotes = list(dict.fromkeys(
                         quote for quote in item.jd_quotes if _quote_is_grounded(quote, job.description)
                     ))
-                    if not grounded_fact_ids or not grounded_quotes:
+                    matching_facts = [
+                        reason.strip() for reason in item.matching_facts
+                        if reason.strip() and not re.search(r"(?i)\bfact_[a-z0-9]+\b", reason)
+                    ]
+                    if not grounded_fact_ids or not grounded_quotes or not matching_facts:
                         recommendation.rerank_status = "llm_invalid"
                         missing = []
                         if not grounded_fact_ids:
                             missing.append("没有有效简历事实")
                         if not grounded_quotes:
                             missing.append("没有可定位的 JD 原文")
+                        if not matching_facts:
+                            missing.append("没有有效匹配说明")
                         _pipeline_evidence(recommendation, llm="invalid", llm_detail="、".join(missing))
                         continue
-                    recommendation.llm_score = item.score
-                    recommendation.final_score = recommendation.rule_score + recommendation.vector_score + item.score
+                    score_cap = _llm_score_cap(
+                        recommendation,
+                        len(grounded_fact_ids),
+                        len(item.gaps),
+                        len(item.risks),
+                    )
+                    llm_score = min(item.score, score_cap)
+                    recommendation.llm_score = llm_score
+                    recommendation.final_score = recommendation.rule_score + recommendation.vector_score + llm_score
                     recommendation.rerank_status = "completed"
                     recommendation.evidence = {
                         **recommendation.evidence,
-                        "matching_facts": [
-                            reason for reason in item.matching_facts
-                            if not re.search(r"(?i)\bfact_[a-z0-9]+\b", reason)
-                        ],
+                        "matching_facts": matching_facts,
                         "gaps": item.gaps,
                         "risks": item.risks,
                         "jd_quotes": grounded_quotes,
                         "fact_ids": grounded_fact_ids,
                         "fact_texts": [fact_map[fact_id].redacted_text for fact_id in grounded_fact_ids],
+                        "llm_raw_score": item.score,
+                        "llm_score_cap": score_cap,
                         "validation_warnings": [
                             *(["已丢弃无效 fact_id"] if len(grounded_fact_ids) != len(item.fact_ids) else []),
                             *(["已丢弃无法定位的 JD 引用"] if len(grounded_quotes) != len(item.jd_quotes) else []),
@@ -358,11 +462,13 @@ async def recompute_recommendations(
         else:
             detail = batch_errors[0] if batch_errors else "模型结果缺失或证据无效"
             llm_status = f"degraded:{detail}"
-    else:
+    elif not available:
         llm_status = f"disabled:{llm_reason}"
-        for _, recommendation in eligible:
+        for _, recommendation in candidates:
             _pipeline_evidence(recommendation, llm="disabled", llm_detail=llm_reason)
         db.commit()
+    else:
+        llm_status = "skipped:没有资格明确的岗位"
     db.commit()
     return {
         "version": version,

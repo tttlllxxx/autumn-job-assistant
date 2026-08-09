@@ -4,10 +4,13 @@ from pathlib import Path
 
 import httpx
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
+from app.core.database import Base
 from app.sources.base import CrawlContext, OfficialSourceAdapter, normalize_url
 from app.sources.dynamic import AntSourceAdapter, MihoyoSourceAdapter, NeteaseSourceAdapter
-from app.sources.registry import REGISTRY, SOURCE_FIELD_MAPS
+from app.sources.registry import REGISTRY, SOURCE_FIELD_MAPS, get_registry, save_custom_source_configs
 from app.cli.live_sources import main as live_sources_main
 
 
@@ -26,6 +29,23 @@ def test_registry_contains_exactly_fifteen_target_companies() -> None:
     assert isinstance(REGISTRY["ant"], AntSourceAdapter)
     assert isinstance(REGISTRY["netease"], NeteaseSourceAdapter)
     assert isinstance(REGISTRY["mihoyo"], MihoyoSourceAdapter)
+
+
+def test_custom_source_is_persisted_and_merged_without_changing_builtin_registry() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        save_custom_source_configs(db, [{
+            "source_key": "custom_fictional",
+            "display_name": "虚构公司",
+            "official_entry": "https://careers.example.invalid/jobs",
+        }])
+        combined = get_registry(db)
+
+    assert len(REGISTRY) == 15
+    assert len(combined) == 16
+    assert combined["custom_fictional"].display_name == "虚构公司"
+    assert combined["custom_fictional"]._is_official("https://careers.example.invalid/jobs/1")
 
 
 def test_embedded_official_json_maps_fields_and_rejects_foreign_url() -> None:

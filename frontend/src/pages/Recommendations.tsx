@@ -3,6 +3,9 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api, jsonBody } from "../api";
 import { AsyncState, Status } from "../components/AsyncState";
+import { type Notice, TaskNotice } from "../components/TaskNotice";
+import { formatShanghaiTime } from "../time";
+import { taskKeys, useTaskPending } from "../taskState";
 import type { Page, Recommendation } from "../types";
 
 type RecommendationStatus = "recommended" | "pending" | "filtered" | "all";
@@ -40,14 +43,26 @@ function reasonFor(rec: Recommendation): string | null {
 export function Recommendations() {
   const client = useQueryClient();
   const [status, setStatus] = useState<RecommendationStatus>("recommended");
+  const [notice, setNotice] = useState<Notice>(null);
   const recs = useQuery<Page<Recommendation>>({
     queryKey: ["recommendations", status],
     queryFn: () => api(`/api/recommendations?page_size=200&status=${status}`),
   });
   const recompute = useMutation({
+    mutationKey: taskKeys.recommendationRecompute,
     mutationFn: () => api<Record<string, string | number>>("/api/recommendations/recompute", jsonBody({})),
-    onSuccess: () => void client.invalidateQueries({ queryKey: ["recommendations"] }),
+    onSuccess: (result) => {
+      void client.invalidateQueries({ queryKey: ["recommendations"] });
+      const llm = String(result.llm_status ?? "");
+      setNotice({
+        kind: llm === "completed" ? "success" : "warning",
+        message: `推荐更新完成：已处理 ${result.jobs} 个岗位，${result.eligible} 个通过硬条件。`,
+      });
+    },
+    onError: (error) => setNotice({ kind: "error", message: `推荐更新失败：${error.message}` }),
   });
+  const recomputePending = useTaskPending(taskKeys.recommendationRecompute);
+  const updatedAt = formatShanghaiTime(recs.data?.updated_at, "尚未更新");
 
   return <>
     <header className="page-head">
@@ -55,11 +70,13 @@ export function Recommendations() {
         <p className="eyebrow">岗位匹配</p>
         <h1>为你筛出的机会</h1>
         <p>岗位详情与推荐结果一体返回；过滤、资格待定和模型降级都有明确原因。</p>
+        <small className="last-updated">上次更新：{updatedAt}</small>
       </div>
-      <button onClick={() => recompute.mutate()} disabled={recompute.isPending}>
-        {recompute.isPending ? "正在计算…" : "更新推荐"}
+      <button onClick={() => recompute.mutate()} disabled={recomputePending}>
+        {recomputePending ? "正在计算…" : "更新推荐"}
       </button>
     </header>
+    <TaskNotice notice={notice} onClose={() => setNotice(null)} />
     {recompute.error && <p role="alert" className="error-text">{recompute.error.message}</p>}
     {recompute.data && <p className={String(recompute.data.llm_status).startsWith("completed") ? "run-result success" : "run-result warning"}>
       已处理 {recompute.data.jobs} 个岗位；合格 {recompute.data.eligible} 个。向量：{recompute.data.vector_status}；LLM：{recompute.data.llm_status}
@@ -78,10 +95,9 @@ export function Recommendations() {
       <div className="card-list">{recs.data?.items.map((rec, index) => {
         const job = rec.job;
         const reason = reasonFor(rec);
-        return <Link className="recommendation-card" to={`/jobs/${rec.job_id}`} key={rec.id}>
-          <span className="rank">{String(index + 1).padStart(2, "0")}</span>
-          <span className="company-mark">{job.company.slice(0, 1)}</span>
-          <div className="recommendation-main">
+        return <article className="recommendation-card" key={rec.id}>
+          <Link className="recommendation-card-link" to={`/jobs/${rec.job_id}`}>
+          <span className="rank">{String(index + 1).padStart(2, "0")}</span><span className="company-mark">{job.company.slice(0, 1)}</span><div className="recommendation-main">
             <p>{job.company}</p>
             <h2>{job.title}</h2>
             <small>{job.location ?? "地点待确认"}<i>·</i>{rec.qualification_pending ? "资格待确认" : "资格明确"}</small>
@@ -91,8 +107,8 @@ export function Recommendations() {
           <div className="score-details">
             <span>规则 {rec.rule_score.toFixed(1)}</span><span>向量 {rec.vector_score.toFixed(1)}</span><span>LLM {rec.llm_score?.toFixed(1) ?? "—"}</span><Status value={rec.rerank_status} />
           </div>
-          <span className="card-arrow" aria-hidden="true">→</span>
-        </Link>;
+          <span className="card-arrow" aria-hidden="true">→</span></Link>
+        </article>;
       })}</div>
     </AsyncState>
   </>;

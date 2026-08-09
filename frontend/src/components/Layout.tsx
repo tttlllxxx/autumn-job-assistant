@@ -2,7 +2,7 @@ import { NavLink, Outlet } from "react-router-dom";
 
 const links = [
   ["/", "概览", "01"], ["/recommendations", "岗位推荐", "02"], ["/applications", "投递看板", "03"],
-  ["/setup", "简历导入", "04"], ["/profile", "画像与事实", "05"], ["/resumes", "定制简历", "06"],
+  ["/setup", "简历导入", "04"], ["/profile", "画像与事实", "05"], ["/resumes", "修改建议", "06"],
 ];
 
 const systemLinks = [["/sources", "数据来源", "07"], ["/settings", "设置与备份", "08"]];

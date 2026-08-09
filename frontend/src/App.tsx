@@ -11,6 +11,7 @@ import { ResumeVersions } from "./pages/ResumeVersions";
 import { Settings } from "./pages/Settings";
 import { Setup } from "./pages/Setup";
 import { Sources } from "./pages/Sources";
+import { TailorAdvice } from "./pages/TailorAdvice";
 
 function LocalSessionLayout() {
   const session = useQuery<{ authenticated: boolean; csrf_token: string }>({
@@ -28,5 +29,5 @@ function LocalSessionLayout() {
 }
 
 export function App() {
-  return <Routes><Route element={<LocalSessionLayout />}><Route path="/" element={<Dashboard />} /><Route path="/setup" element={<Setup />} /><Route path="/profile" element={<Profile />} /><Route path="/recommendations" element={<Recommendations />} /><Route path="/jobs/:id" element={<JobDetail />} /><Route path="/sources" element={<Sources />} /><Route path="/applications" element={<Applications />} /><Route path="/resumes" element={<ResumeVersions />} /><Route path="/settings" element={<Settings />} /></Route><Route path="*" element={<Navigate to="/" replace />} /></Routes>;
+  return <Routes><Route element={<LocalSessionLayout />}><Route path="/" element={<Dashboard />} /><Route path="/setup" element={<Setup />} /><Route path="/profile" element={<Profile />} /><Route path="/recommendations" element={<Recommendations />} /><Route path="/jobs/:id" element={<JobDetail />} /><Route path="/sources" element={<Sources />} /><Route path="/applications" element={<Applications />} /><Route path="/resumes" element={<ResumeVersions />} /><Route path="/resumes/jobs/:id" element={<TailorAdvice />} /><Route path="/settings" element={<Settings />} /></Route><Route path="*" element={<Navigate to="/" replace />} /></Routes>;
 }

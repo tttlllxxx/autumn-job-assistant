@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.models.entities import AppSetting, CostLedger
+from app.services.llm_keys import resolve_llm_api_key
 
 T = TypeVar("T", bound=BaseModel)
 Provider = Literal["api", "codex", "disabled"]
@@ -48,9 +49,12 @@ def current_month_cost(db: Session) -> float:
 def resolved_llm_settings(settings: Settings, db: Session) -> Settings:
     updates = {}
     for key in LLM_RUNTIME_KEYS:
+        if key == "llm_api_key":
+            continue
         item = db.get(AppSetting, key)
         if item is not None:
             updates[key] = item.value
+    updates["llm_api_key"] = resolve_llm_api_key(db, settings.llm_api_key)
     return settings.model_copy(update=updates)
 
 

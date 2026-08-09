@@ -49,3 +49,7 @@ class SourceRunRequest(BaseModel):
     allow_browser: bool = True
     max_jobs_per_source: int = Field(default=100, ge=1, le=500)
 
+
+class CustomSourceCreate(BaseModel):
+    company: str = Field(min_length=1, max_length=100)
+    official_entry: HttpUrl

@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from typing import Literal
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -13,6 +13,8 @@ from app.core.security import get_current_session, require_csrf
 from app.models.entities import AppSetting, AuthSession, CostLedger
 from app.services.feishu import send_webhook
 from app.services.llm import configured_provider, llm_available, resolved_llm_settings, selected_provider
+from app.services.llm_keys import add_llm_api_key, activate_llm_api_key, delete_llm_api_key, llm_key_options
+from app.services.llm_pricing import suggest_llm_pricing
 
 router = APIRouter(prefix="/api/settings", tags=["设置"])
 
@@ -56,9 +58,22 @@ class LLMConfigUpdate(BaseModel):
         return value
 
 
+class LLMKeyCreate(BaseModel):
+    label: str = Field(min_length=1, max_length=80)
+    api_key: str = Field(min_length=4, max_length=10000)
+
+    @field_validator("label", "api_key")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("不能为空")
+        return stripped
+
+
 def _llm_config_response(settings: Settings, db: Session) -> dict:
     resolved = resolved_llm_settings(settings, db)
-    key_item = db.get(AppSetting, "llm_api_key")
+    keys, active_key_id = llm_key_options(db, settings.llm_api_key)
     return {
         "llm_base_url": resolved.llm_base_url,
         "llm_model": resolved.llm_model,
@@ -66,7 +81,9 @@ def _llm_config_response(settings: Settings, db: Session) -> dict:
         "llm_output_price_rmb_per_million": resolved.llm_output_price_rmb_per_million,
         "llm_monthly_budget_rmb": resolved.llm_monthly_budget_rmb,
         "api_key_configured": bool(resolved.llm_api_key),
-        "api_key_source": "local" if key_item is not None and key_item.value else "environment" if resolved.llm_api_key else None,
+        "api_key_source": next((item["source"] for item in keys if item["active"]), None),
+        "active_api_key_id": active_key_id,
+        "api_keys": keys,
     }
 
 
@@ -120,6 +137,21 @@ def llm_config(
     return _llm_config_response(settings, db)
 
 
+@router.get("/llm/pricing-suggestion")
+def llm_pricing_suggestion(
+    base_url: str = Query(max_length=2000),
+    model: str = Query(max_length=255),
+    _: AuthSession = Depends(get_current_session),
+) -> dict:
+    suggestion = suggest_llm_pricing(base_url, model)
+    if suggestion is None:
+        return {
+            "matched": False,
+            "message": "该接口或模型没有可核验的内置价格，请按供应商账单手工填写。",
+        }
+    return suggestion.as_response()
+
+
 @router.patch("/llm", dependencies=[Depends(require_csrf)])
 def update_llm_config(
     payload: LLMConfigUpdate,
@@ -133,6 +165,42 @@ def update_llm_config(
         item.secret = key == "llm_api_key"
         db.add(item)
     db.commit()
+    return _llm_config_response(settings, db)
+
+
+@router.post("/llm/keys", dependencies=[Depends(require_csrf)])
+def create_llm_key(
+    payload: LLMKeyCreate,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    add_llm_api_key(db, payload.label, payload.api_key, settings.llm_api_key)
+    return _llm_config_response(settings, db)
+
+
+@router.post("/llm/keys/{key_id}/activate", dependencies=[Depends(require_csrf)])
+def activate_llm_key(
+    key_id: str,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    try:
+        activate_llm_api_key(db, key_id, settings.llm_api_key)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return _llm_config_response(settings, db)
+
+
+@router.delete("/llm/keys/{key_id}", dependencies=[Depends(require_csrf)])
+def remove_llm_key(
+    key_id: str,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    try:
+        delete_llm_api_key(db, key_id, settings.llm_api_key)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     return _llm_config_response(settings, db)
 
 

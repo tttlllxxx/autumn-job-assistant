@@ -1,15 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import { App } from "../App";
 import { Applications } from "./Applications";
 import { Dashboard } from "./Dashboard";
 import { JobDetail } from "./JobDetail";
 import { Profile } from "./Profile";
 import { Recommendations } from "./Recommendations";
+import { ResumeVersions } from "./ResumeVersions";
 import { Settings } from "./Settings";
 import { Sources } from "./Sources";
+import { TailorAdvice } from "./TailorAdvice";
 
 function jsonResponse(value: unknown): Response {
   return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -71,12 +73,14 @@ describe("关键页面交互", () => {
 
     renderWithClient(<Applications />);
     expect(await screen.findByText("虚构科技")).toBeInTheDocument();
+    expect(screen.getByText("RAG 工程师")).toBeInTheDocument();
+    expect(screen.getByText("已投递 → 投递 · 待处理")).toBeInTheDocument();
     expect(screen.queryByLabelText("导入 CSV")).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "导出 CSV" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Offer 已接收" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "已终止" })).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("虚构科技 状态"), { target: { value: "面试中" } });
+    fireEvent.change(screen.getByLabelText("RAG 工程师 状态"), { target: { value: "面试中" } });
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
         "/api/applications/1",
@@ -128,6 +132,11 @@ describe("关键页面交互", () => {
 
     renderWithClient(<Profile />);
     const directions = await screen.findByLabelText("目标方向（用逗号或顿号分隔）");
+    expect(directions).toBeDisabled();
+    expect(screen.queryByText(/v1/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "保存画像偏好" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "修改画像" }));
+    expect(directions).not.toBeDisabled();
     fireEvent.change(directions, { target: { value: "RAG 工程、AI Agent 开发" } });
     fireEvent.click(screen.getByRole("button", { name: "保存画像偏好" }));
 
@@ -135,6 +144,7 @@ describe("关键页面交互", () => {
       "/api/profile",
       expect.objectContaining({ method: "PATCH", body: expect.stringContaining("AI Agent 开发") }),
     ));
+    await waitFor(() => expect(directions).toBeDisabled());
   });
 
   it("来源失败时可手工保存官方 JD", async () => {
@@ -160,11 +170,12 @@ describe("关键页面交互", () => {
     expect(await screen.findByText("岗位已保存。")).toBeInTheDocument();
   });
 
-  it("可在设置页保存 API 配置且不要求重新输入已有 Key", async () => {
+  it("可查看脱敏 Key 并在不修改 Key 时保存 API 配置", async () => {
     localStorage.setItem("csrf_token", "fictional-csrf");
-    const llmConfig = { llm_base_url: "https://api.example.invalid/v1", llm_model: "old-model", llm_input_price_rmb_per_million: 1, llm_output_price_rmb_per_million: 2, llm_monthly_budget_rmb: 50, api_key_configured: true, api_key_source: "local" };
+    const llmConfig = { llm_base_url: "https://api.example.invalid/v1", llm_model: "old-model", llm_input_price_rmb_per_million: 1, llm_output_price_rmb_per_million: 2, llm_monthly_budget_rmb: 50, api_key_configured: true, api_key_source: "local", active_api_key_id: "key-1", api_keys: [{ id: "key-1", label: "DeepSeek 主 Key", masked: "sk-•••1234", source: "local", active: true, created_at: "2026-08-09T00:00:00Z" }, { id: "key-2", label: "DeepSeek 备用 Key", masked: "sk-•••5678", source: "local", active: false, created_at: "2026-08-09T00:00:00Z" }] };
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
+      if (path === "/api/settings/llm/keys/key-2/activate" && init?.method === "POST") return jsonResponse({ ...llmConfig, active_api_key_id: "key-2", api_keys: llmConfig.api_keys.map((item) => ({ ...item, active: item.id === "key-2" })) });
       if (path === "/api/settings/llm" && init?.method === "PATCH") return jsonResponse({ ...llmConfig, llm_model: "new-model" });
       if (path === "/api/settings/llm") return jsonResponse(llmConfig);
       if (path === "/api/settings/preferences") return jsonResponse({ degraded_summary_enabled: false, llm_provider: "auto", effective_llm_provider: "api", llm_available: true, llm_reason: null });
@@ -175,9 +186,15 @@ describe("关键页面交互", () => {
     globalThis.fetch = fetchMock as typeof fetch;
 
     renderWithClient(<Settings />);
+    expect(screen.queryByLabelText("模型名称")).not.toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "DeepSeek 主 Key · sk-•••1234" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("当前使用的 API Key"), { target: { value: "key-2" } });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/settings/llm/keys/key-2/activate", expect.objectContaining({ method: "POST" })));
+    fireEvent.click(screen.getByRole("button", { name: "编辑 API 配置" }));
     const model = await screen.findByLabelText("模型名称");
-    expect(screen.getByPlaceholderText("已配置；留空则保持不变")).toHaveValue("");
+    expect(screen.getByLabelText("Key 名称")).toHaveValue("old-model");
     fireEvent.change(model, { target: { value: "new-model" } });
+    expect(screen.getByLabelText("Key 名称")).toHaveValue("new-model");
     fireEvent.click(screen.getByRole("button", { name: "保存 API 配置" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
@@ -186,6 +203,28 @@ describe("关键页面交互", () => {
     ));
     const patchCall = fetchMock.mock.calls.find(([path, init]) => String(path) === "/api/settings/llm" && init?.method === "PATCH");
     expect(String(patchCall?.[1]?.body)).not.toContain("llm_api_key");
+  });
+
+  it("识别已知官方模型并自动补全空白价格", async () => {
+    localStorage.setItem("csrf_token", "fictional-csrf");
+    const llmConfig = { llm_base_url: "https://api.deepseek.com", llm_model: "deepseek-v4-flash", llm_input_price_rmb_per_million: null, llm_output_price_rmb_per_million: null, llm_monthly_budget_rmb: 50, api_key_configured: true, api_key_source: "local" };
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/settings/llm/pricing-suggestion")) return jsonResponse({ matched: true, provider: "DeepSeek", model: "deepseek-v4-flash", input_price_rmb_per_million: 1.008, output_price_rmb_per_million: 2.016, pricing_basis: "官方标准价", source_url: "https://api-docs.deepseek.com/quick_start/pricing", verified_on: "2026-08-09", usd_to_rmb_rate: 7.2 });
+      if (path === "/api/settings/llm") return jsonResponse(llmConfig);
+      if (path === "/api/settings/preferences") return jsonResponse({ degraded_summary_enabled: false, llm_provider: "auto", effective_llm_provider: "api", llm_available: false, llm_reason: "未配置 token 价格" });
+      if (path === "/api/settings/budget") return jsonResponse({ month: "2026-08", budget_rmb: 50, used_rmb: 0, remaining_rmb: 50, llm_enabled: false, degraded_reason: "未配置 token 价格", pricing_configured: false, llm_provider: "api", cost_note: null });
+      if (path === "/api/evaluation") return jsonResponse({ status: "collecting", labels: 0, required_labels: 50, precision_at_10: null, unlabeled_top10_job_ids: [] });
+      return jsonResponse({});
+    }) as typeof fetch;
+
+    renderWithClient(<Settings />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 API 配置" }));
+    await waitFor(() => expect(screen.getByLabelText("输入价格（元 / 百万 token）")).toHaveValue(1.008));
+    expect(screen.getByLabelText("输出价格（元 / 百万 token）")).toHaveValue(2.016);
+    expect(screen.getByLabelText("Key 名称")).toHaveValue("deepseek-v4-flash");
+    expect(screen.getByText("已识别 DeepSeek 参考价格")).toBeInTheDocument();
   });
 
   it("岗位符合判断作为评测样本提交且不调整权重", async () => {
@@ -241,6 +280,117 @@ describe("关键页面交互", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("status=pending"), expect.any(Object),
     ));
+  });
+
+  it("推荐页显示上次更新时间并在任务完成后弹出提示", async () => {
+    localStorage.setItem("csrf_token", "fictional-csrf");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/recommendations/recompute" && init?.method === "POST") {
+        return jsonResponse({ jobs: 12, eligible: 8, llm_status: "completed", vector_status: "ok" });
+      }
+      return jsonResponse({ items: [], total: 0, page: 1, page_size: 200, counts: {}, updated_at: "2026-08-09T01:02:03Z" });
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    renderWithClient(<MemoryRouter><Recommendations /></MemoryRouter>);
+    expect(await screen.findByText(/2026\/8\/9/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "更新推荐" }));
+    expect(await screen.findByText("推荐更新完成：已处理 12 个岗位，8 个通过硬条件。")).toBeInTheDocument();
+  });
+
+  it("推荐计算切换页面后仍保持进行中且不能重复提交", async () => {
+    localStorage.setItem("csrf_token", "fictional-csrf");
+    let finishRecompute: ((response: Response) => void) | undefined;
+    const recomputeResponse = new Promise<Response>((resolve) => { finishRecompute = resolve; });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/recommendations/recompute" && init?.method === "POST") return recomputeResponse;
+      return jsonResponse({ items: [], total: 0, page: 1, page_size: 200, counts: {}, updated_at: null });
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    renderWithClient(<MemoryRouter initialEntries={["/recommendations"]}><Routes>
+      <Route path="/recommendations" element={<><Link to="/other">切到其他页面</Link><Recommendations /></>} />
+      <Route path="/other" element={<Link to="/recommendations">返回推荐</Link>} />
+    </Routes></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: "更新推荐" }));
+    expect(await screen.findByRole("button", { name: "正在计算…" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("link", { name: "切到其他页面" }));
+    fireEvent.click(await screen.findByRole("link", { name: "返回推荐" }));
+
+    expect(await screen.findByRole("button", { name: "正在计算…" })).toBeDisabled();
+    expect(fetchMock.mock.calls.filter(([path]) => String(path) === "/api/recommendations/recompute")).toHaveLength(1);
+
+    await act(async () => finishRecompute?.(jsonResponse({ jobs: 12, eligible: 8, llm_status: "completed", vector_status: "ok" })));
+    expect(await screen.findByRole("button", { name: "更新推荐" })).toBeEnabled();
+  });
+
+  it("自定义公司来源在提交后立即解析并显示完成提示", async () => {
+    localStorage.setItem("csrf_token", "fictional-csrf");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/sources/custom" && init?.method === "POST") {
+        return jsonResponse({ success: true, discovered: 6, new: 4, error: null });
+      }
+      return jsonResponse([]);
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    renderWithClient(<Sources />);
+    fireEvent.change(screen.getByLabelText("公司名称"), { target: { value: "虚构公司" } });
+    fireEvent.change(screen.getByLabelText("官方招聘入口"), { target: { value: "https://careers.example.invalid/jobs" } });
+    fireEvent.click(screen.getByRole("button", { name: "添加并解析岗位" }));
+
+    expect(await screen.findByText("公司已添加并解析完成：发现 6 个岗位，新增 4 个。")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/sources/custom",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ company: "虚构公司", official_entry: "https://careers.example.invalid/jobs" }) }),
+    );
+  });
+
+  it("修改方案只从岗位详情生成并进入 06 栏显示修改后示例", async () => {
+    localStorage.setItem("csrf_token", "fictional-csrf");
+    let generated = false;
+    const recommendation = {
+      id: 1, job_id: 101, hard_filter_passed: true, hard_filter_details: {}, qualification_pending: false,
+      rule_score: 25, vector_score: 20, llm_score: 30, final_score: 75, rerank_status: "completed",
+      evidence: {}, model_name: "fictional", prompt_version: "v1", scoring_version: "v1", created_at: "2026-08-09T00:00:00Z",
+      job: { id: 101, company: "虚构公司", title: "RAG 工程师", location: "上海", source_key: "manual" },
+    };
+    const advice = {
+      job: recommendation.job, recommendation_version: 2, updated_at: "2026-08-09T00:00:00Z", gaps: [],
+      suggestions: [{ section: "项目经历", action: "将 RAG 项目前置", current_text: "使用 Python 构建 RAG 项目", suggested_text: "【Python、RAG】使用 Python 构建 RAG 项目", rationale: "与岗位直接匹配", jd_quote: "熟悉 RAG" }],
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/jobs/101/tailor-advice" && init?.method === "POST") {
+        generated = true;
+        return jsonResponse(advice);
+      }
+      if (path === "/api/jobs/101/tailor-advice") return jsonResponse(advice);
+      if (path === "/api/jobs/101") return jsonResponse({ ...recommendation.job, description: "熟悉 RAG", normalized_url: "https://example.invalid/jobs/101", closed: false, qualification_confirmed: true });
+      if (path.startsWith("/api/feedback/weights")) return jsonResponse({ total_weight: 0, limit: 5, suitability: null });
+      if (path === "/api/tailor-advice") return jsonResponse(generated ? [{ job: recommendation.job, recommendation_version: 2, updated_at: advice.updated_at, suggestion_count: 1 }] : []);
+      if (path.startsWith("/api/recommendations")) return jsonResponse({ items: [{ ...recommendation, evidence: generated ? { tailor_advice: {} } : {} }], total: 1, page: 1, page_size: 200, counts: { recommended: 1 } });
+      return jsonResponse([]);
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    const recommendationsView = renderWithClient(<MemoryRouter><Recommendations /></MemoryRouter>);
+    expect(await screen.findByText("RAG 工程师")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /生成修改/ })).not.toBeInTheDocument();
+    recommendationsView.unmount();
+
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const detailView = renderWithClient(<MemoryRouter initialEntries={["/jobs/101"]}><Routes><Route path="/jobs/:id" element={<JobDetail />} /></Routes></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: "生成修改方案" }));
+    expect(await screen.findByText(/06 修改建议/)).toBeInTheDocument();
+    detailView.unmount();
+
+    renderWithClient(<MemoryRouter initialEntries={["/resumes"]}><Routes><Route path="/resumes" element={<ResumeVersions />} /><Route path="/resumes/jobs/:id" element={<TailorAdvice />} /></Routes></MemoryRouter>);
+    expect(await screen.findByText("RAG 工程师")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("查看修改建议 →"));
+    expect(await screen.findByRole("heading", { name: "将 RAG 项目前置" })).toBeInTheDocument();
+    expect(screen.getByText("【Python、RAG】使用 Python 构建 RAG 项目")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([path]) => String(path) === "/api/jobs/101/tailor-advice")).toBe(true);
   });
 
   it("首页高分推荐显示真实岗位名称而不是内部编号", async () => {

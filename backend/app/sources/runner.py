@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.models.entities import JobPosting, SourceHealth, SourceRun
 from app.sources.base import CrawlContext, JobPayload, normalize_url
-from app.sources.registry import REGISTRY
+from app.sources.registry import REGISTRY, get_registry
 
 USER_AGENT = "AutumnJobAssistant/0.1 (single-user personal job search)"
 
@@ -66,7 +66,7 @@ def _upsert_job(db: Session, source_key: str, company: str, payload: JobPayload)
 
 
 async def run_source(db: Session, source_key: str, *, allow_browser: bool = False, max_jobs: int = 100) -> SourceRun:
-    adapter = REGISTRY[source_key]
+    adapter = REGISTRY.get(source_key) or get_registry(db)[source_key]
     run = SourceRun(source_key=source_key, adapter_version=adapter.parser_version)
     db.add(run)
     db.commit()
@@ -132,6 +132,8 @@ async def run_source(db: Session, source_key: str, *, allow_browser: bool = Fals
 async def run_all_sources(*, allow_browser: bool = False, max_jobs: int = 100) -> None:
     from app.core.database import SessionLocal
 
-    for source_key in REGISTRY:
+    with SessionLocal() as db:
+        source_keys = list(get_registry(db))
+    for source_key in source_keys:
         with SessionLocal() as db:
             await run_source(db, source_key, allow_browser=allow_browser, max_jobs=max_jobs)

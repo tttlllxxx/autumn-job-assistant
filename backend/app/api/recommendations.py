@@ -31,8 +31,10 @@ def list_recommendations(
         return RecommendationPage(
             items=[], total=0, page=page, page_size=page_size,
             counts={"all": 0, "recommended": 0, "pending": 0, "filtered": 0},
+            updated_at=None,
         )
     version_filter = Recommendation.version == version
+    updated_at = db.scalar(select(func.max(Recommendation.created_at)).where(version_filter))
     counts = {
         "all": int(db.scalar(select(func.count(Recommendation.id)).where(version_filter)) or 0),
         "recommended": int(db.scalar(select(func.count(Recommendation.id)).where(
@@ -81,7 +83,7 @@ def list_recommendations(
         for recommendation, job in rows
     ]
     return RecommendationPage(
-        items=items, total=total, page=page, page_size=page_size, counts=counts
+        items=items, total=total, page=page, page_size=page_size, counts=counts, updated_at=updated_at
     )
 
 

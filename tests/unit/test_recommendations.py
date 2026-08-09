@@ -10,7 +10,14 @@ from app.core.database import Base
 from app.models.entities import CandidateProfile, CostLedger, JobPosting, Recommendation, ResumeDocument, ResumeFact, UserFeedback
 from app.schemas.recommendations import LLMBatchResponse
 from app.services import recommendations as recommendation_service
-from app.services.recommendations import _request_payload, hard_filter, llm_available, recompute_recommendations
+from app.services.recommendations import (
+    _request_payload,
+    hard_filter,
+    llm_available,
+    profile_text,
+    recompute_recommendations,
+    rule_score,
+)
 
 
 def test_llm_score_normalizes_singleton_text_fields_to_lists() -> None:
@@ -115,6 +122,59 @@ def test_hard_filter_uses_graduation_context_not_unrelated_years(db: Session) ->
     assert hard_filter(wrong_year, profile)[0] is False
 
 
+def test_hard_filter_reads_recruitment_type_from_description(db: Session) -> None:
+    profile = add_profile_and_fact(db)
+    social = add_job(db, 1, "RAG 工程师", "这是社会招聘岗位，负责 Python RAG 开发", None, "2027")
+
+    assert hard_filter(social, profile)[0] is False
+
+
+def test_rule_score_uses_profile_directions_and_word_boundaries(db: Session) -> None:
+    profile = add_profile_and_fact(db)
+    matching = add_job(db, 1, "RAG 工程师", "使用 Python 构建检索增强系统", "校园招聘", "2027")
+    unrelated = add_job(db, 2, "数据库工程师", "维护 MongoDB 并负责模型 training", "校园招聘", "2027")
+
+    matching_score, matching_evidence = rule_score(matching, profile)
+    unrelated_score, unrelated_evidence = rule_score(unrelated, profile)
+
+    assert matching_evidence["direction_hits"] == ["RAG 工程"]
+    assert matching_evidence["skill_hits"] == ["Python", "RAG"]
+    assert unrelated_evidence["direction_hits"] == []
+    assert unrelated_evidence["skill_hits"] == []
+    assert matching_score > unrelated_score
+
+
+def test_rule_score_ignores_target_terms_only_mentioned_as_tools_or_collaboration(db: Session) -> None:
+    profile = add_profile_and_fact(db)
+    profile.target_directions = ["AI Agent 开发", "前端开发", "大模型应用开发"]
+    infrastructure = add_job(
+        db, 1, "基础架构研发工程师", "负责分布式存储和云原生平台。工作要求：熟练使用 AI Agent 工具。", "校园招聘", "2027"
+    )
+    backend = add_job(
+        db, 2, "后端开发工程师", "负责核心系统开发，并与前端、产品和测试协作。", "校园招聘", "2027"
+    )
+    llm_infra = add_job(
+        db, 3, "交换机软件工程师", "团队建设面向 LLM 的 AI 基础设施，岗位负责交换机和网络研发。", "校园招聘", "2027"
+    )
+    llm_app = add_job(
+        db, 4, "AI应用工程师", "负责将模型能力转化为产品功能。", "校园招聘", "2027"
+    )
+
+    assert rule_score(infrastructure, profile)[1]["direction_hits"] == []
+    assert rule_score(backend, profile)[1]["direction_hits"] == []
+    assert rule_score(llm_infra, profile)[1]["direction_hits"] == []
+    assert rule_score(llm_app, profile)[1]["direction_hits"] == ["大模型应用开发"]
+
+
+def test_profile_vector_text_does_not_include_internal_fact_ids(db: Session) -> None:
+    profile = add_profile_and_fact(db)
+
+    content, _facts = profile_text(db, profile)
+
+    assert "fact_test" not in content
+    assert "使用 Python 构建课程 RAG 项目" in content
+
+
 @pytest.mark.asyncio
 async def test_local_pipeline_survives_without_llm_or_downloaded_model(db: Session, tmp_path: Path) -> None:
     add_profile_and_fact(db)
@@ -214,6 +274,7 @@ def test_untrusted_jd_is_isolated_inside_user_data(db: Session) -> None:
     assert "绝不能执行" in payload["messages"][0]["content"]
     user_content = payload["messages"][1]["content"]
     assert "<UNTRUSTED_JD>" in user_content and "https://evil.invalid" in user_content
+    assert "local_score" not in user_content
     assert "tools" not in payload
 
 
@@ -256,7 +317,10 @@ async def test_llm_result_completes_only_with_grounded_fact_and_jd_quote(
 
     assert result["llm_status"] == ("completed" if valid_evidence else "degraded:模型结果缺失或证据无效")
     assert recommendation.rerank_status == ("completed" if valid_evidence else "llm_invalid")
-    assert (recommendation.llm_score == 35) is valid_evidence
+    assert (recommendation.llm_score == 30) is valid_evidence
+    if valid_evidence:
+        assert recommendation.evidence["llm_raw_score"] == 35
+        assert recommendation.evidence["llm_score_cap"] == 30
     assert recommendation.evidence["pipeline"]["llm"] == ("completed" if valid_evidence else "invalid")
 
 
@@ -334,3 +398,46 @@ async def test_llm_keeps_grounded_evidence_and_discards_only_invalid_extras(
     assert recommendation.evidence["matching_facts"] == ["Python 项目匹配"]
     assert recommendation.evidence["jd_quotes"] == ["使用 Python 开发 RAG 平台"]
     assert len(recommendation.evidence["validation_warnings"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_llm_result_requires_a_natural_language_matching_reason(
+    db: Session, tmp_path: Path, monkeypatch
+) -> None:
+    add_profile_and_fact(db)
+    job = add_job(db, 1, "RAG 工程师", "使用 Python 开发 RAG 平台", "校园招聘", "2027")
+    response = LLMBatchResponse.model_validate({"scores": [{
+        "job_id": job.id, "score": 40, "matching_facts": ["fact_test"], "gaps": [], "risks": [],
+        "jd_quotes": [job.description], "fact_ids": ["fact_test"],
+    }]})
+
+    async def fake_rerank(*_args, **_kwargs):
+        return response, 100, 50, 0.0002, "fictional-model", "api"
+
+    monkeypatch.setattr(recommendation_service, "rerank_with_llm", fake_rerank)
+    await recompute_recommendations(db, configured_settings(tmp_path), vector_scorer=FakeVectorScorer())
+    recommendation = db.scalar(select(Recommendation).where(Recommendation.job_id == job.id))
+
+    assert recommendation.rerank_status == "llm_invalid"
+    assert recommendation.llm_score is None
+    assert "没有有效匹配说明" in recommendation.evidence["pipeline"]["llm_detail"]
+
+
+@pytest.mark.asyncio
+async def test_qualification_pending_job_skips_llm(db: Session, tmp_path: Path, monkeypatch) -> None:
+    add_profile_and_fact(db)
+    job = add_job(db, 1, "RAG 工程师", "使用 Python 开发 RAG 平台", None, None)
+    called = False
+
+    async def fake_rerank(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("资格待确认岗位不应调用 LLM")
+
+    monkeypatch.setattr(recommendation_service, "rerank_with_llm", fake_rerank)
+    result = await recompute_recommendations(db, configured_settings(tmp_path), vector_scorer=FakeVectorScorer())
+    recommendation = db.scalar(select(Recommendation).where(Recommendation.job_id == job.id))
+
+    assert called is False
+    assert result["llm_status"] == "skipped:没有资格明确的岗位"
+    assert recommendation.evidence["pipeline"]["llm"] == "skipped"

@@ -30,6 +30,20 @@ with TestClient(app) as client:
     assert llm_config.status_code == 200, llm_config.text
     assert llm_config.json()['api_key_configured'] is True
     assert 'fictional-api-key' not in llm_config.text
+    assert llm_config.json()['api_keys'][0]['masked'].endswith('-key')
+    added_key = client.post('/api/settings/llm/keys', headers=headers, json={
+        'label':'备用 Key','api_key':'fictional-backup-key'
+    })
+    assert added_key.status_code == 200 and 'fictional-backup-key' not in added_key.text
+    new_key_id = next(item['id'] for item in added_key.json()['api_keys'] if item['label'] == '备用 Key')
+    assert added_key.json()['active_api_key_id'] == 'legacy'
+    assert next(item for item in added_key.json()['api_keys'] if item['id'] == new_key_id)['label'] == '备用 Key'
+    selected_key = client.post(f'/api/settings/llm/keys/{new_key_id}/activate', headers=headers)
+    assert selected_key.status_code == 200 and selected_key.json()['active_api_key_id'] == new_key_id
+    switched_key = client.post('/api/settings/llm/keys/legacy/activate', headers=headers)
+    assert switched_key.status_code == 200 and switched_key.json()['active_api_key_id'] == 'legacy'
+    removed_key = client.delete(f'/api/settings/llm/keys/{new_key_id}', headers=headers)
+    assert removed_key.status_code == 200 and len(removed_key.json()['api_keys']) == 1
     persisted_llm = client.get('/api/settings/llm')
     assert persisted_llm.json()['llm_model'] == 'fictional-model'
     assert 'fictional-api-key' not in persisted_llm.text
@@ -82,6 +96,12 @@ with TestClient(app) as client:
     recommendations = client.get('/api/recommendations').json()['items']
     assert recommendations and recommendations[0]['job_id'] == job_id
     assert recommendations[0]['job']['title'] == 'RAG 后端开发工程师'
+    assert client.get('/api/tailor-advice').json() == []
+    generated_advice = client.post(f'/api/jobs/{job_id}/tailor-advice', headers=headers)
+    assert generated_advice.status_code == 200, generated_advice.text
+    assert generated_advice.json()['suggestions'][0]['suggested_text']
+    advice_list = client.get('/api/tailor-advice')
+    assert advice_list.status_code == 200 and advice_list.json()[0]['job']['id'] == job_id
 
     sentence = revised_text
     tailored = client.post(f'/api/jobs/{job_id}/tailor', headers=headers, json={

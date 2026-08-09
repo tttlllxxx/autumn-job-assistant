@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -44,6 +45,7 @@ class RecommendationOut(BaseModel):
     prompt_version: str
     scoring_version: str
     estimated_cost_rmb: float | None
+    created_at: datetime
 
 
 class RecommendationWithJobOut(RecommendationOut):
@@ -56,6 +58,7 @@ class RecommendationPage(BaseModel):
     page: int
     page_size: int
     counts: dict[str, int]
+    updated_at: datetime | None = None
 
 
 class FeedbackRequest(BaseModel):
