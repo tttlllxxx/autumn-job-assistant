@@ -135,6 +135,56 @@ describe("关键页面交互", () => {
     await waitFor(() => expect(screen.queryByText("RAG 工程师")).not.toBeInTheDocument());
   });
 
+  it("投递进度表支持组合筛选、岗位排序和升降序切换", async () => {
+    const baseApplication = {
+      job_id: null,
+      channel: "官网",
+      position_type: "校园招聘",
+      department: "研发",
+      base_location: "上海",
+      applied_date: "2026-08-08",
+      stage_result: "待处理",
+      next_action: "准备材料",
+      url: "",
+      contact: "",
+      interview_time: null,
+      referral_code: "",
+      result: "",
+      notes: "",
+      created_at: "2026-08-08T00:00:00Z",
+    };
+    const applications = [
+      { ...baseApplication, id: 1, company: "Z 公司", position: "B 岗位", status: "已投递", current_stage: "投递", next_action_at: "2026-08-20T18:00:00", progress_updated_at: "2026-08-08T08:00:00Z" },
+      { ...baseApplication, id: 2, company: "X 公司", position: "A 岗位", status: "面试中", current_stage: "一面", next_action_at: "2026-08-15T18:00:00", progress_updated_at: "2026-08-10T08:00:00Z" },
+      { ...baseApplication, id: 3, company: "Y 公司", position: "C 岗位", status: "已投递", current_stage: "笔试", next_action_at: null, progress_updated_at: "2026-08-09T08:00:00Z" },
+    ];
+    globalThis.fetch = vi.fn(async () => jsonResponse({ items: applications, total: 3, page: 1, page_size: 200 })) as typeof fetch;
+
+    renderWithClient(<MemoryRouter><Applications /></MemoryRouter>);
+    await screen.findByText("A 岗位");
+    const positionOrder = () => Array.from(document.querySelectorAll<HTMLTableCellElement>("tbody .application-job strong"))
+      .map((element) => element.textContent);
+
+    expect(positionOrder()).toEqual(["A 岗位", "C 岗位", "B 岗位"]);
+
+    fireEvent.change(screen.getByLabelText("按状态筛选"), { target: { value: "已投递" } });
+    expect(positionOrder()).toEqual(["C 岗位", "B 岗位"]);
+    fireEvent.change(screen.getByLabelText("按阶段筛选"), { target: { value: "笔试" } });
+    expect(positionOrder()).toEqual(["C 岗位"]);
+    expect(screen.getByText("1 / 3 个岗位")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "重置" }));
+    fireEvent.change(screen.getByLabelText("排序方式"), { target: { value: "position" } });
+    expect(positionOrder()).toEqual(["A 岗位", "B 岗位", "C 岗位"]);
+    fireEvent.click(screen.getByRole("button", { name: "当前升序，点击切换" }));
+    expect(positionOrder()).toEqual(["C 岗位", "B 岗位", "A 岗位"]);
+
+    fireEvent.change(screen.getByLabelText("排序方式"), { target: { value: "deadline" } });
+    expect(positionOrder()).toEqual(["A 岗位", "B 岗位", "C 岗位"]);
+    fireEvent.change(screen.getByLabelText("搜索岗位或公司"), { target: { value: "Y 公司" } });
+    expect(positionOrder()).toEqual(["C 岗位"]);
+  });
+
   it("可在进度表内部新建投递并立即渲染", async () => {
     localStorage.setItem("csrf_token", "fictional-csrf");
     const saved = { id: 2, company: "内部创建公司", position: "AI 工程师", status: "待投递", current_stage: "投递", stage_result: "待处理", base_location: "深圳", notes: "", created_at: "2026-08-06T00:00:00Z" };

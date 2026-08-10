@@ -352,9 +352,12 @@ blockquote { margin-left: 0; padding: 1px 0 1px 13px; color: #555761; border-lef
 .application-summary strong { color: var(--ink); font-size: 21px; }
 .application-summary .attention { background: var(--warning-soft); border-color: #efd8aa; }
 .application-summary .attention strong { color: var(--warning); }
-.application-controls { margin-bottom: 10px; padding: 10px; display: grid; grid-template-columns: minmax(260px, 1fr) 150px 135px 130px auto; align-items: center; gap: 8px; background: #fff; border: 1px solid var(--line); border-radius: var(--radius-lg); }
+.application-controls { margin-bottom: 10px; padding: 10px; display: grid; grid-template-columns: minmax(220px, 1fr) 140px 125px 125px 82px auto 42px; align-items: center; gap: 8px; background: #fff; border: 1px solid var(--line); border-radius: var(--radius-lg); }
 .application-controls label { margin: 0; }
 .application-controls input, .application-controls select { min-height: 34px; padding: 6px 9px; font-size: 11px; }
+.application-controls > button { min-height: 34px; padding: 6px 9px; font-size: 10px; white-space: nowrap; }
+.application-sort-direction { font-variant-numeric: tabular-nums; }
+.application-reset-controls { color: var(--ink-subtle); }
 .application-controls > span { color: var(--ink-subtle); font-size: 10px; text-align: right; white-space: nowrap; }
 .application-table-shell { overflow-x: auto; background: #fff; border: 1px solid var(--line); border-radius: var(--radius-lg); }
 .application-table { width: 100%; min-width: 1050px; border-collapse: collapse; table-layout: fixed; }

@@ -13,7 +13,8 @@ const terminalStatuses = new Set(["Offer 已接收", "Offer 已拒绝", "未通�
 
 type EditableField = "status" | "current_stage" | "stage_result" | "next_action" | "next_action_at" | "channel" | "contact" | "interview_time" | "referral_code" | "result" | "notes";
 type ApplicationUpdate = { id: number; changes: Partial<Pick<Application, EditableField>> };
-type SortMode = "updated" | "deadline" | "company";
+type SortMode = "updated" | "deadline" | "position" | "company";
+type SortDirection = "asc" | "desc";
 
 type NewApplication = {
   company: string;
@@ -90,6 +91,7 @@ export function Applications() {
   const [statusFilter, setStatusFilter] = useState("全部状态");
   const [stageFilter, setStageFilter] = useState("全部阶段");
   const [sortMode, setSortMode] = useState<SortMode>("updated");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const location = useLocation();
   const client = useQueryClient();
@@ -165,15 +167,38 @@ export function Applications() {
       .filter((item) => statusFilter === "全部状态" || item.status === statusFilter)
       .filter((item) => stageFilter === "全部阶段" || item.current_stage === stageFilter)
       .sort((left, right) => {
-        if (sortMode === "company") return `${left.company}${left.position}`.localeCompare(`${right.company}${right.position}`, "zh-CN");
-        if (sortMode === "deadline") {
-          const leftTime = left.next_action_at ? new Date(left.next_action_at).getTime() : Number.POSITIVE_INFINITY;
-          const rightTime = right.next_action_at ? new Date(right.next_action_at).getTime() : Number.POSITIVE_INFINITY;
-          return leftTime - rightTime;
+        const direction = sortDirection === "asc" ? 1 : -1;
+        if (sortMode === "company") {
+          return direction * `${left.company}${left.position}`.localeCompare(`${right.company}${right.position}`, "zh-CN");
         }
-        return new Date(right.progress_updated_at ?? right.created_at).getTime() - new Date(left.progress_updated_at ?? left.created_at).getTime();
+        if (sortMode === "position") {
+          return direction * `${left.position}${left.company}`.localeCompare(`${right.position}${right.company}`, "zh-CN");
+        }
+        if (sortMode === "deadline") {
+          if (!left.next_action_at && !right.next_action_at) return 0;
+          if (!left.next_action_at) return 1;
+          if (!right.next_action_at) return -1;
+          return direction * (new Date(left.next_action_at).getTime() - new Date(right.next_action_at).getTime());
+        }
+        return direction * (
+          new Date(left.progress_updated_at ?? left.created_at).getTime()
+          - new Date(right.progress_updated_at ?? right.created_at).getTime()
+        );
       });
-  }, [allItems, search, sortMode, stageFilter, statusFilter]);
+  }, [allItems, search, sortDirection, sortMode, stageFilter, statusFilter]);
+
+  const resetControls = () => {
+    setSearch("");
+    setStatusFilter("全部状态");
+    setStageFilter("全部阶段");
+    setSortMode("updated");
+    setSortDirection("desc");
+  };
+  const controlsChanged = Boolean(search.trim())
+    || statusFilter !== "全部状态"
+    || stageFilter !== "全部阶段"
+    || sortMode !== "updated"
+    || sortDirection !== "desc";
 
   const activeCount = allItems.filter((item) => !terminalStatuses.has(item.status)).length;
   const actionCount = allItems.filter((item) => !terminalStatuses.has(item.status) && (item.next_action ?? "").trim()).length;
@@ -194,7 +219,15 @@ export function Applications() {
 
     <section className="application-summary" aria-label="投递概览"><article><span>全部岗位</span><strong>{allItems.length}</strong></article><article><span>进行中</span><strong>{activeCount}</strong></article><article><span>已有下一步</span><strong>{actionCount}</strong></article><article className={urgentCount ? "attention" : ""}><span>临近或已超期</span><strong>{urgentCount}</strong></article></section>
 
-    <section className="application-controls" aria-label="筛选投递"><label className="application-search"><span className="sr-only">搜索岗位或公司</span><input type="search" placeholder="搜索岗位、公司、部门或城市" value={search} onChange={(event) => setSearch(event.target.value)} /></label><label><span className="sr-only">按状态筛选</span><select aria-label="按状态筛选" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option>全部状态</option>{statuses.map((status) => <option key={status}>{status}</option>)}</select></label><label><span className="sr-only">按阶段筛选</span><select aria-label="按阶段筛选" value={stageFilter} onChange={(event) => setStageFilter(event.target.value)}><option>全部阶段</option>{stages.map((stage) => <option key={stage}>{stage}</option>)}</select></label><label><span className="sr-only">排序方式</span><select aria-label="排序方式" value={sortMode} onChange={(event) => setSortMode(event.target.value as SortMode)}><option value="updated">最近更新</option><option value="deadline">截止时间</option><option value="company">公司名称</option></select></label><span>{visibleItems.length} / {allItems.length} 个岗位</span></section>
+    <section className="application-controls" aria-label="筛选投递">
+      <label className="application-search"><span className="sr-only">搜索岗位或公司</span><input aria-label="搜索岗位或公司" type="search" placeholder="搜索岗位、公司、部门或城市" value={search} onChange={(event) => setSearch(event.target.value)} /></label>
+      <label><span className="sr-only">按状态筛选</span><select aria-label="按状态筛选" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option>全部状态</option>{statuses.map((status) => <option key={status}>{status}</option>)}</select></label>
+      <label><span className="sr-only">按阶段筛选</span><select aria-label="按阶段筛选" value={stageFilter} onChange={(event) => setStageFilter(event.target.value)}><option>全部阶段</option>{stages.map((stage) => <option key={stage}>{stage}</option>)}</select></label>
+      <label><span className="sr-only">排序方式</span><select aria-label="排序方式" value={sortMode} onChange={(event) => { const nextMode = event.target.value as SortMode; setSortMode(nextMode); setSortDirection(nextMode === "updated" ? "desc" : "asc"); }}><option value="updated">最近更新</option><option value="deadline">截止时间</option><option value="position">岗位名称</option><option value="company">公司名称</option></select></label>
+      <button type="button" className="secondary application-sort-direction" aria-label={`当前${sortDirection === "asc" ? "升序" : "降序"}，点击切换`} onClick={() => setSortDirection((current) => current === "asc" ? "desc" : "asc")}>{sortDirection === "asc" ? "↑ 升序" : "↓ 降序"}</button>
+      <span>{visibleItems.length} / {allItems.length} 个岗位</span>
+      <button type="button" className="text-button application-reset-controls" disabled={!controlsChanged} onClick={resetControls}>重置</button>
+    </section>
 
     {(update.error && !update.isPending) && <p className="error-text" role="alert">更新失败，已恢复原状态：{update.error.message}</p>}
     {(deleteApplication.error && !deleteApplication.isPending) && <p className="error-text" role="alert">删除失败，已恢复投递记录：{deleteApplication.error.message}</p>}
@@ -204,7 +237,7 @@ export function Applications() {
         const deleting = deleteApplication.isPending && deleteApplication.variables === item.id;
         const expanded = expandedId === item.id;
         return <Fragment key={item.id}><tr id={`application-${item.id}`} className={`${saving || deleting || item.id < 0 ? "saving" : ""} ${terminalStatuses.has(item.status) ? "terminal" : ""}`}><td data-label="岗位"><div className="application-job"><strong>{item.position}</strong></div></td><td data-label="状态"><select aria-label={`${item.position} 状态`} value={item.status} disabled={item.id < 0} onChange={(event) => update.mutate({ id: item.id, changes: { status: event.target.value } })}>{statuses.map((value) => <option key={value}>{value}</option>)}</select></td><td data-label="当前进度"><div className="progress-selects"><select aria-label={`${item.position} 当前阶段`} value={item.current_stage} disabled={item.id < 0} onChange={(event) => update.mutate({ id: item.id, changes: { current_stage: event.target.value } })}>{stages.map((value) => <option key={value}>{value}</option>)}</select><select aria-label={`${item.position} 阶段结果`} value={item.stage_result} disabled={item.id < 0} onChange={(event) => update.mutate({ id: item.id, changes: { stage_result: event.target.value } })}>{results.map((value) => <option key={value}>{value}</option>)}</select></div></td><td data-label="下一步行动"><input className="table-text-input" aria-label={`${item.position} 下一步行动`} defaultValue={item.next_action} disabled={item.id < 0} placeholder="填写下一步" onBlur={(event) => saveText(item, "next_action", event.target.value.trim())} /></td><td data-label="截止时间"><input className={`table-date-input ${deadlineClass(item.next_action_at)}`} aria-label={`${item.position} 截止时间`} type="datetime-local" value={localDateTime(item.next_action_at)} disabled={item.id < 0} onChange={(event) => update.mutate({ id: item.id, changes: { next_action_at: event.target.value || null } })} /></td><td data-label="最近更新"><span className="application-updated">{formatShanghaiTime(item.progress_updated_at ?? item.created_at, "尚未更新")}</span>{saving && <small className="saving-label">保存中…</small>}{deleting && <small className="saving-label">删除中…</small>}</td><td className="application-row-action"><div className="application-row-actions"><button className="text-button" disabled={deleting} aria-expanded={expanded} onClick={() => setExpandedId(expanded ? null : item.id)}>{expanded ? "收起" : "详情"}</button><button className="danger-link" disabled={deleting || item.id < 0} aria-label={`删除 ${item.position}`} onClick={() => window.confirm(`确认从投递进度中删除“${item.position}”？`) && deleteApplication.mutate(item.id)}>删除</button></div></td></tr>{expanded && <tr className="application-detail-row"><td colSpan={7}><div className="application-detail"><div className="application-detail-meta"><p><span>投递渠道</span><b>{item.channel || "未填写"}</b></p><p><span>业务部门</span><b>{item.department || "未填写"}</b></p><p><span>岗位类型</span><b>{item.position_type || "未填写"}</b></p><p><span>投递日期</span><b>{item.applied_date || "未填写"}</b></p></div><div className="application-detail-form"><label><span>联系人 / 内推人</span><input defaultValue={item.contact} onBlur={(event) => saveText(item, "contact", event.target.value.trim())} /></label><label><span>面试时间</span><input type="datetime-local" value={localDateTime(item.interview_time)} onChange={(event) => update.mutate({ id: item.id, changes: { interview_time: event.target.value || null } })} /></label><label><span>内推码</span><input defaultValue={item.referral_code} onBlur={(event) => saveText(item, "referral_code", event.target.value.trim())} /></label><label><span>最终结果</span><input defaultValue={item.result} onBlur={(event) => saveText(item, "result", event.target.value.trim())} /></label><label className="full"><span>备注</span><textarea defaultValue={item.notes} onBlur={(event) => saveText(item, "notes", event.target.value.trim())} /></label></div><div className="application-detail-actions">{item.job_id && <Link className="button secondary" to={`/jobs/${item.job_id}`}>查看岗位详情</Link>}{item.url && <a className="button secondary" href={item.url} target="_blank" rel="noreferrer">打开官方职位 ↗</a>}</div></div></td></tr>}</Fragment>;
-      })}</tbody></table></div> : <section className="panel application-filter-empty"><p>没有符合当前筛选条件的岗位。</p><button className="secondary" onClick={() => { setSearch(""); setStatusFilter("全部状态"); setStageFilter("全部阶段"); }}>清除筛选</button></section>}
+      })}</tbody></table></div> : <section className="panel application-filter-empty"><p>没有符合当前筛选条件的岗位。</p><button className="secondary" onClick={resetControls}>清除筛选</button></section>}
     </AsyncState>
   </>;
 }
