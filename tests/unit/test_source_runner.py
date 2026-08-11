@@ -9,13 +9,21 @@ from app.sources.runner import _payload_rejection_reason, _upsert_job, run_sourc
 from app.sources import runner
 
 
-def payload(job_id: str, title: str, *, url: str, shared: bool, description: str = "虚构岗位正文") -> JobPayload:
+def payload(
+    job_id: str,
+    title: str,
+    *,
+    url: str,
+    shared: bool,
+    description: str = "虚构岗位正文",
+    recruitment_type: str = "校园招聘",
+) -> JobPayload:
     return JobPayload(
         external_job_id=job_id,
         title=title,
         department="虚构部门",
         location="上海",
-        recruitment_type="校园招聘",
+        recruitment_type=recruitment_type,
         graduation_year="2027",
         description=description,
         application_url=url,
@@ -43,6 +51,51 @@ def test_concrete_job_payload_is_not_rejected() -> None:
     item = payload(
         "GOOD", "RAG 后端开发工程师", url="https://jobs.example.invalid/jobs/GOOD", shared=False,
         description="负责检索增强服务开发；要求熟悉 Python、数据库和分布式系统。",
+    )
+
+    assert _payload_rejection_reason(item) is None
+
+
+def test_concrete_engineer_role_with_talent_plan_suffix_is_not_rejected() -> None:
+    item = payload(
+        "PLAN-JOB",
+        "AI Native搜推算法工程师-π天才计划",
+        url="https://jobs.example.invalid/jobs/PLAN-JOB",
+        shared=False,
+        description="负责大模型搜索与推荐算法研发。",
+    )
+
+    assert _payload_rejection_reason(item) is None
+
+
+@pytest.mark.parametrize(
+    ("title", "recruitment_type"),
+    [
+        ("RAG 工程师实习生", "校园招聘"),
+        ("具身模型算法工程师【转正实习】", "校园招聘"),
+        ("AI Agent Intern", "Campus Recruitment"),
+        ("RAG 工程师", "校园招聘 · 实习"),
+    ],
+)
+def test_internship_payloads_are_rejected(title: str, recruitment_type: str) -> None:
+    item = payload(
+        "INTERN",
+        title,
+        url="https://jobs.example.invalid/jobs/INTERN",
+        shared=False,
+        recruitment_type=recruitment_type,
+    )
+
+    assert _payload_rejection_reason(item) == "实习岗位，不属于秋招正式岗位"
+
+
+def test_formal_job_with_internship_experience_or_internvl_is_not_rejected() -> None:
+    item = payload(
+        "FORMAL",
+        "InternVL 多模态模型工程师",
+        url="https://jobs.example.invalid/jobs/FORMAL",
+        shared=False,
+        description="负责模型应用开发，有大模型实习经验者优先。",
     )
 
     assert _payload_rejection_reason(item) is None
@@ -154,6 +207,24 @@ async def test_source_run_records_accepted_and_rejected_funnel(monkeypatch) -> N
     assert run.accepted_count == 1
     assert run.rejected_count == 1
     assert run.rejection_reasons == {"页面导航或隐私条款，不是岗位": 1}
+
+
+@pytest.mark.asyncio
+async def test_source_with_only_internships_is_healthy_with_zero_accepted(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    internship = payload(
+        "INTERN",
+        "AI Agent 实习生",
+        url="https://jobs.example.invalid/jobs/INTERN",
+        shared=False,
+    )
+    with Session(engine) as db:
+        run = await run_fixture(db, monkeypatch, FixtureAdapter([internship]))
+
+    assert run.success is True
+    assert run.accepted_count == 0
+    assert run.rejection_reasons == {"实习岗位，不属于秋招正式岗位": 1}
 
 
 @pytest.mark.asyncio

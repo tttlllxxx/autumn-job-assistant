@@ -23,7 +23,7 @@ export function Sources() {
     mutationKey: taskKeys.sourceRun,
     mutationFn: (keys?: string[]) => api<{ results: Array<{ source_key: string; success: boolean; discovered: number; accepted: number; rejected: number; error: string | null }> }>(
       "/api/sources/run",
-      jsonBody({ source_keys: keys, allow_browser: true, max_jobs_per_source: 100 }),
+      jsonBody({ source_keys: keys, allow_browser: true, max_jobs_per_source: 500 }),
     ),
     onMutate: () => setNotice(null),
     onSuccess: (result) => {

@@ -18,7 +18,7 @@ class CrawlContext:
     client: httpx.AsyncClient
     allow_browser: bool = False
     timeout_seconds: float = 20
-    max_jobs: int = 100
+    max_jobs: int = 500
     request_count: int = 0
     encountered_auth: bool = False
 
@@ -99,6 +99,9 @@ class OfficialSourceAdapter:
     department_keys = (
         "department", "businessUnit", "orgName", "deptName", "BGName", "ComName", "positionDept",
     )
+    navigation_titles = frozenset({
+        "首页", "职位", "校园招聘", "校招", "社会招聘", "社招", "应届招聘", "实习招聘", "招聘职位",
+    })
 
     def __init__(
         self,
@@ -180,7 +183,16 @@ class OfficialSourceAdapter:
         raw_url = self._first(data, self.url_keys)
         if not title or len(str(title)) > 300 or not (external_id or raw_url):
             return None
-        has_job_fields = bool(self._first(data, self.description_keys + self.location_keys + self.department_keys))
+        has_description = bool(self._first(data, self.description_keys))
+        has_department = bool(self._first(data, self.department_keys))
+        has_location = bool(self._first(data, self.location_keys))
+        explicit_job_id = bool(self._first(data, tuple(
+            key for key in self.id_keys if key not in {"id", "code"}
+        )))
+        looks_like_location_entity = bool({"country", "district", "state"}.intersection(data))
+        if looks_like_location_entity and not has_description and not has_department and not explicit_job_id:
+            return None
+        has_job_fields = has_description or has_location or has_department
         if not raw_url and not has_job_fields:
             return None
         if raw_url:
@@ -195,6 +207,25 @@ class OfficialSourceAdapter:
             return None
         return JobStub(str(external_id or normalize_url(url)), normalize_url(url), str(title).strip(), data)
 
+    @classmethod
+    def _navigation_like(cls, title: str) -> bool:
+        return re.sub(r"\s+", "", title).casefold() in {
+            re.sub(r"\s+", "", item).casefold() for item in cls.navigation_titles
+        }
+
+    @staticmethod
+    def _plausible_external_id(external_id: str) -> bool:
+        return len(external_id) >= 3 or external_id.isdigit()
+
+    @staticmethod
+    def _deduplicate_stubs(stubs: list[JobStub]) -> list[JobStub]:
+        unique: dict[str, JobStub] = {}
+        for stub in stubs:
+            current = unique.get(stub.external_job_id)
+            if current is None or (stub.raw and not current.raw):
+                unique[stub.external_job_id] = stub
+        return list(unique.values())
+
     def parse_document(self, html: str, base_url: str) -> list[JobStub]:
         soup = BeautifulSoup(html, "lxml")
         results: dict[tuple[str, str], JobStub] = {}
@@ -202,7 +233,10 @@ class OfficialSourceAdapter:
             url = normalize_url(urljoin(base_url, str(anchor.get("href"))))
             if self._is_official(url) and self._detail_like(url):
                 external_id = self._external_id_from_url(url)
-                stub = JobStub(external_id, url, anchor.get_text(" ", strip=True))
+                title = anchor.get_text(" ", strip=True)
+                if self._navigation_like(title) or not self._plausible_external_id(external_id):
+                    continue
+                stub = JobStub(external_id, url, title)
                 results[(stub.external_job_id, stub.detail_url)] = stub
         json_nodes: list[Any] = []
         for script in soup.find_all("script"):
@@ -215,7 +249,12 @@ class OfficialSourceAdapter:
                     candidates.append(body.split(marker, 1)[1].strip().rstrip(";"))
             for candidate in candidates:
                 try:
-                    node, _ = json.JSONDecoder().raw_decode(candidate.lstrip())
+                    normalized_candidate = re.sub(
+                        r":\s*undefined(?=\s*[,}])",
+                        ":null",
+                        candidate.lstrip(),
+                    )
+                    node, _ = json.JSONDecoder().raw_decode(normalized_candidate)
                     json_nodes.append(node)
                     break
                 except (json.JSONDecodeError, TypeError):
@@ -230,7 +269,8 @@ class OfficialSourceAdapter:
             url = normalize_url(match.rstrip(",.;)"))
             if self._is_official(url) and self._detail_like(url):
                 external_id = self._external_id_from_url(url)
-                results[(external_id, url)] = JobStub(external_id, url)
+                if self._plausible_external_id(external_id):
+                    results[(external_id, url)] = JobStub(external_id, url)
         return list(results.values())
 
     async def _get(self, context: CrawlContext, url: str) -> httpx.Response:
@@ -284,8 +324,7 @@ class OfficialSourceAdapter:
                 stub = self._stub_from_object(item)
                 if stub:
                     results.append(stub)
-        unique = {(item.external_job_id, item.detail_url): item for item in results}
-        return list(unique.values())
+        return self._deduplicate_stubs(results)
 
     async def discover(self, context: CrawlContext) -> list[JobStub]:
         response = await self._get(context, self.start_url)
@@ -293,8 +332,7 @@ class OfficialSourceAdapter:
         has_complete_embedded_job = any(self._payload_from_raw(stub) is not None for stub in results)
         if not results or (context.allow_browser and not has_complete_embedded_job):
             results.extend(await self._browser_discover(context))
-        unique = {(item.external_job_id, item.detail_url): item for item in results}
-        return list(unique.values())[: context.max_jobs]
+        return self._deduplicate_stubs(results)[: context.max_jobs]
 
     def _payload_from_raw(self, stub: JobStub) -> JobPayload | None:
         data = stub.raw

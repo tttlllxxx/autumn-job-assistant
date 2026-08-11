@@ -15,7 +15,15 @@ from app.models.entities import JobPosting, SourceRun
 from app.schemas.jobs import SourceUpdate
 from app.sources.ats import AshbySourceAdapter, GreenhouseSourceAdapter, LeverSourceAdapter, MokaSourceAdapter
 from app.sources.base import CrawlContext, OfficialSourceAdapter, normalize_url
-from app.sources.dynamic import AntSourceAdapter, MihoyoSourceAdapter, NeteaseSourceAdapter, TencentSourceAdapter
+from app.sources.dynamic import (
+    AlibabaSourceAdapter,
+    AntSourceAdapter,
+    KuaishouSourceAdapter,
+    MeituanSourceAdapter,
+    MihoyoSourceAdapter,
+    NeteaseSourceAdapter,
+    TencentSourceAdapter,
+)
 from app.sources.registry import (
     REGISTRY,
     SOURCE_FIELD_MAPS,
@@ -40,7 +48,10 @@ def test_registry_contains_exactly_fifteen_target_companies() -> None:
     assert set(SOURCE_FIELD_MAPS) == set(REGISTRY)
     assert all({"title", "id", "description", "location"}.issubset(adapter.field_map) for adapter in REGISTRY.values())
     assert isinstance(REGISTRY["ant"], AntSourceAdapter)
+    assert isinstance(REGISTRY["alibaba"], AlibabaSourceAdapter)
+    assert isinstance(REGISTRY["kuaishou"], KuaishouSourceAdapter)
     assert isinstance(REGISTRY["tencent"], TencentSourceAdapter)
+    assert isinstance(REGISTRY["meituan"], MeituanSourceAdapter)
     assert isinstance(REGISTRY["netease"], NeteaseSourceAdapter)
     assert isinstance(REGISTRY["mihoyo"], MihoyoSourceAdapter)
     assert isinstance(REGISTRY["didi"], MokaSourceAdapter)
@@ -348,6 +359,75 @@ def test_navigation_config_is_not_misclassified_as_a_job() -> None:
     ) is None
 
 
+def test_nested_office_address_is_not_misclassified_as_a_job() -> None:
+    adapter = REGISTRY["bytedance"]
+
+    assert adapter._stub_from_object({
+        "id": "7449297142948937732",
+        "name": "中国大陆北京市海淀区海淀大街3号",
+        "city": {"name": "北京"},
+        "district": {"name": "海淀区"},
+        "state": {"name": "北京"},
+        "country": {"name": "中国大陆"},
+    }) is None
+
+
+def test_recruitment_navigation_links_are_not_jobs() -> None:
+    adapter = REGISTRY["kuaishou"]
+    html = '<a href="/recruit/campus/e/#/campus/jobs?recruitSubProjectCodes=2027">应届招聘</a>'
+
+    assert adapter.parse_document(html, adapter.start_url) == []
+
+
+@pytest.mark.asyncio
+async def test_discovery_deduplicates_anchor_and_embedded_json_by_external_id() -> None:
+    adapter = OfficialSourceAdapter(
+        source_key="fixture",
+        display_name="虚构公司",
+        start_url="https://jobs.example.invalid/list",
+        allowed_domains=("jobs.example.invalid",),
+        detail_tokens=("/position/",),
+        detail_url_template="https://jobs.example.invalid/position/{id}",
+    )
+    html = """
+        <a href="/position/J1001?from=list">虚构岗位 展开详情</a>
+        <script type="application/json">
+        {"jobs":[{"jobId":"J1001","jobName":"虚构岗位","jobDescription":"负责虚构平台开发"}]}
+        </script>
+    """
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _request: httpx.Response(200, text=html)
+    )) as client:
+        stubs = await adapter.discover(CrawlContext(client=client))
+
+    assert len(stubs) == 1
+    assert stubs[0].external_job_id == "J1001"
+    assert stubs[0].raw["jobDescription"] == "负责虚构平台开发"
+
+
+def test_baidu_javascript_initial_data_tolerates_undefined_and_maps_complete_job() -> None:
+    adapter = REGISTRY["baidu"]
+    html = """
+        <script>
+        window.__USE_SSR__=true; window.__INITIAL_DATA__ =
+        {"listData":{"listDetailData":[{
+          "jobId":"baidu-101","name":"北京-虚构后端开发工程师(J100101)",
+          "workContent":"负责核心系统开发","serviceCondition":"熟悉 Python 与分布式系统",
+          "workPlace":"北京市","projectType":"校招"
+        }],"projectType": undefined}}; window.prefix="/jobs";
+        </script>
+    """
+
+    stubs = adapter.parse_document(html, adapter.start_url)
+    payload = adapter._payload_from_raw(stubs[0])
+
+    assert len(stubs) == 1
+    assert payload is not None
+    assert payload.external_job_id == "baidu-101"
+    assert payload.location == "北京市"
+    assert "熟悉 Python" in payload.description
+
+
 def test_external_id_comes_from_query_or_non_generic_path_segment() -> None:
     assert OfficialSourceAdapter._external_id_from_url(
         "https://jobs.example.invalid/position/7669996401640835333/detail"
@@ -504,6 +584,164 @@ async def test_ant_public_api_keeps_complete_2027_graduate_jobs_only() -> None:
     assert payload.graduation_year == "2027"
     assert payload.location == "杭州、上海"
     assert "工作职责" in payload.description and "任职要求" in payload.description
+
+
+@pytest.mark.asyncio
+async def test_alibaba_public_api_discovers_every_page_of_2027_graduate_jobs() -> None:
+    pages: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, text="<html></html>", headers={
+                "set-cookie": "XSRF-TOKEN=test-csrf; Path=/",
+            })
+        assert request.url.params.get("_csrf") == "test-csrf"
+        if request.url.path.endswith("/listBatch"):
+            return httpx.Response(200, json={"success": True, "content": {
+                "graduate": [{"id": 2027, "name": "阿里巴巴2027届应届生"}],
+                "internship": [{"id": 99, "name": "日常实习生"}],
+            }})
+        body = json.loads(request.content)
+        page = body["pageIndex"]
+        pages.append(page)
+        items = [
+            {
+                "id": page * 100 + index,
+                "name": f"AI Agent 工程师-{page}-{index}",
+                "description": "负责构建 Agent 应用",
+                "requirement": "熟悉 Python",
+                "workLocations": ["杭州"],
+                "categoryName": "技术类",
+            }
+            for index in range(100 if page == 1 else 1)
+        ]
+        return httpx.Response(200, json={"success": True, "content": {
+            "datas": items, "totalCount": 101, "pageSize": body["pageSize"], "currentPage": page,
+        }})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        context = CrawlContext(client=client, max_jobs=10)
+        stubs = await REGISTRY["alibaba"].discover(context)
+
+    assert pages == [1]
+    assert len(stubs) == 10
+
+    pages.clear()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        context = CrawlContext(client=client, max_jobs=250)
+        stubs = await REGISTRY["alibaba"].discover(context)
+        payload = REGISTRY["alibaba"]._payload_from_raw(stubs[-1])
+
+    assert pages == [1, 2]
+    assert len(stubs) == 101
+    assert payload is not None
+    assert payload.graduation_year == "2027"
+    assert payload.location == "杭州"
+    assert payload.application_url.endswith("/campus/position/200")
+
+
+@pytest.mark.asyncio
+async def test_kuaishou_public_api_uses_page_num_until_last_page() -> None:
+    pages: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        page = body["pageNum"]
+        pages.append(page)
+        assert body == {
+            "recruitSubProjectCodes": ["20271779425607"],
+            "pageSize": 10,
+            "pageNum": page,
+        }
+        item = {
+            "id": page,
+            "name": f"Agent 研发工程师-{page}",
+            "description": "负责 Agent 系统研发",
+            "positionDemand": "熟悉 Python",
+            "departmentName": "技术部",
+            "workLocationDicts": [{"name": "北京"}],
+        }
+        return httpx.Response(200, json={"code": 200, "result": {
+            "list": [item], "pages": 2, "pageNum": page, "pageSize": 10,
+        }})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        context = CrawlContext(client=client, max_jobs=20)
+        stubs = await REGISTRY["kuaishou"].discover(context)
+        payload = REGISTRY["kuaishou"]._payload_from_raw(stubs[-1])
+
+    assert pages == [1, 2]
+    assert [stub.external_job_id for stub in stubs] == ["1", "2"]
+    assert payload is not None
+    assert payload.location == "北京"
+    assert payload.application_url.endswith("#/campus/job-info/2")
+
+
+@pytest.mark.asyncio
+async def test_meituan_public_campus_api_excludes_page_config_and_maps_jobs() -> None:
+    response = {"status": 1, "message": "成功", "data": {
+        "list": [{
+            "jobUnionId": "MT-2027-1",
+            "name": "大模型算法工程师",
+            "jobStatus": "000",
+            "jobDuty": "负责大模型训练和智能体系统研发",
+            "jobRequirement": "2027届本科及以上学历，熟悉 Python",
+            "jobFamily": "技术类",
+            "jobFamilyGroup": "算法",
+            "cityList": [{"name": "北京市"}, {"name": "上海市"}],
+            "department": [],
+            "refreshTime": 1786351348000,
+        }],
+        "page": {"pageNo": 1, "pageSize": 100, "totalPage": 1, "totalCount": 1},
+    }}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert request.url.path == "/api/official/job/getJobList"
+        assert body["jobType"] == [{"code": "1", "subCode": ["1"]}, {"code": "4", "subCode": ["1"]}]
+        assert body["typeCode"] == ["1", "1"]
+        assert body["jfJgList"] == [{"code": "11001", "subCode": []}]
+        assert body["specialCode"] == ["1", "3"]
+        return httpx.Response(200, json=response)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        context = CrawlContext(client=client, max_jobs=100)
+        stubs = await REGISTRY["meituan"].discover(context)
+        payload = await REGISTRY["meituan"].fetch_detail(stubs[0], context)
+
+    assert len(stubs) == 1
+    assert payload.external_job_id == "MT-2027-1"
+    assert payload.graduation_year == "2027"
+    assert payload.location == "北京市、上海市"
+    assert payload.department == "算法"
+    assert "负责大模型训练" in payload.description
+    assert "熟悉 Python" in payload.description
+
+
+@pytest.mark.asyncio
+async def test_meituan_public_api_uses_page_no_until_last_page() -> None:
+    pages: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        page = body["page"]["pageNo"]
+        pages.append(page)
+        return httpx.Response(200, json={"status": 1, "data": {
+            "list": [{
+                "jobUnionId": f"MT-{page}",
+                "name": f"大模型应用工程师-{page}",
+                "jobStatus": "000",
+                "jobDuty": "负责 Agent 应用研发",
+            }],
+            "page": {"pageNo": page, "pageSize": 10, "totalPage": 3, "totalCount": 3},
+        }})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        context = CrawlContext(client=client, max_jobs=30)
+        stubs = await REGISTRY["meituan"].discover(context)
+
+    assert pages == [1, 2, 3]
+    assert [stub.external_job_id for stub in stubs] == ["MT-1", "MT-2", "MT-3"]
 
 
 @pytest.mark.asyncio

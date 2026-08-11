@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
-from app.core.target_policy import TARGET_POLICY
+from app.core.target_policy import TARGET_POLICY, TargetPolicy
 from app.models.entities import CandidateProfile, CostLedger, JobPosting, Recommendation, ResumeFact, UserFeedback
 from app.schemas.recommendations import LLMBatchResponse
 from app.services.llm import (
@@ -39,8 +39,15 @@ DIRECTION_ALIAS_GROUPS = (
     (("云原生", "基础架构"), ("云原生", "基础架构", "infra", "kubernetes")),
     (("测试开发",), ("测试开发", "测开", "自动化测试")),
 )
+TECHNICAL_ROLE_TERMS = (
+    "工程师", "开发", "研发", "算法", "研究员", "架构师", "技术", "sre", "scientist",
+)
+DIRECTION_ACTION_TERMS = (
+    "开发", "研发", "构建", "设计", "实现", "工程", "架构", "算法", "研究", "训练", "评测", "优化", "落地", "编程",
+    "develop", "engineer", "research", "build", "design", "implement", "architect",
+)
 PROMPT_VERSION = "rerank-v3"
-SCORING_VERSION = "rule-vector-llm-v3"
+SCORING_VERSION = "rule-vector-llm-v4"
 LLM_BATCH_SIZE = 10
 
 
@@ -74,19 +81,49 @@ def _direction_aliases(direction: str) -> tuple[str, ...]:
 
 def _core_direction_text(job: JobPosting) -> str:
     responsibilities = re.split(
-        r"(?:任职|职位|岗位|工作)(?:资格|要求)|我们希望您|基本要求|资格要求",
+        r"(?:任职|职位|岗位|工作)(?:资格|要求)|我们希望您|基本要求|资格要求|"
+        r"(?:^|\n)\s*(?:\d+[.、]\s*)?(?:基础条件|专业能力|加分项)\s*[:：]?",
         job.description,
         maxsplit=1,
+        flags=re.IGNORECASE,
     )[0]
     return f"{job.title}\n{responsibilities}".lower()
 
 
+def _has_direction_context(title: str, text: str, aliases: tuple[str, ...]) -> bool:
+    if any(_contains_term(title, alias) for alias in aliases):
+        return True
+    segments = re.split(r"[\n。；;]", text)
+    for segment in segments:
+        normalized_segment = segment.lower()
+        for alias in aliases:
+            normalized_alias = alias.lower()
+            if re.fullmatch(r"[a-z0-9][a-z0-9.+#-]*", normalized_alias):
+                alias_pattern = rf"(?<![a-z0-9]){re.escape(normalized_alias)}(?![a-z0-9])"
+            else:
+                alias_pattern = re.escape(normalized_alias)
+            for match in re.finditer(alias_pattern, normalized_segment):
+                prefix = normalized_segment[max(0, match.start() - 40):match.start()]
+                suffix = normalized_segment[match.end():match.end() + 40]
+                if re.search(r"(?:使用|运用|熟练|借助|利用)\s*.{0,16}$", prefix) or re.match(
+                    r"\s*(?:coding\s*)?\s*工具", suffix
+                ):
+                    continue
+                context = f"{prefix}\n{suffix}"
+                if any(_contains_term(context, action) for action in DIRECTION_ACTION_TERMS):
+                    return True
+    return False
+
+
 def _matched_target_directions(job: JobPosting, profile: CandidateProfile) -> list[str]:
     text = _core_direction_text(job)
+    technical_role = any(_contains_term(job.title, term) for term in TECHNICAL_ROLE_TERMS)
     hits: list[str] = []
     for direction in profile.target_directions:
+        if any(marker in direction for marker in ("开发", "工程")) and not technical_role:
+            continue
         aliases = _direction_aliases(direction)
-        matched = any(_contains_term(text, alias) for alias in aliases)
+        matched = _has_direction_context(job.title.lower(), text, aliases)
         if not matched and any(_contains_term(direction, marker) for marker in ("前端", "frontend")):
             matched = any(_contains_term(job.title, marker) for marker in ("前端", "frontend", "全栈"))
         if not matched and "应用" in direction and any(
@@ -112,7 +149,7 @@ def _graduation_years(job: JobPosting) -> set[str]:
 
 def _matches_recruitment_target(text: str, targets: list[str]) -> bool:
     aliases = {
-        "校园招聘": ("校园招聘", "校招", "校园"),
+        "校园招聘": ("校园招聘", "校招", "校园", "应届", "毕业生", "graduate"),
         "秋季招聘": ("秋季招聘", "秋招"),
         "春季招聘": ("春季招聘", "春招"),
         "实习": ("实习",),
@@ -125,17 +162,35 @@ def _matches_recruitment_target(text: str, targets: list[str]) -> bool:
 
 def hard_filter(job: JobPosting, profile: CandidateProfile) -> tuple[bool, bool, dict]:
     text = f"{job.title}\n{job.recruitment_type or ''}\n{job.graduation_year or ''}\n{job.description}".lower()
-    qualification_text = text
+    recruitment_identity = f"{job.title}\n{job.recruitment_type or ''}".lower()
+    qualification_text = (
+        recruitment_identity
+        if job.recruitment_type
+        else f"{recruitment_identity}\n{job.description}".lower()
+    )
+    direction_text = _core_direction_text(job)
     graduation_years = _graduation_years(job)
     target_year = profile.target_graduation_year or TARGET_POLICY.graduation_year
+    allows_internship = TargetPolicy.targets_include_internship(profile.target_recruitment_types)
+    internship_job = TARGET_POLICY.is_internship_job(job.title, job.recruitment_type)
+    direction_hits = _matched_target_directions(job, profile)
+    excluded_recruitment = (
+        tuple(term for term in TARGET_POLICY.excluded_recruitment if "实习" not in term)
+        if allows_internship
+        else TARGET_POLICY.excluded_recruitment
+    )
     recruitment_known = any(
-        term in qualification_text
-        for term in ("校招", "校园", "秋招", "春招", "实习", *TARGET_POLICY.excluded_recruitment)
+        _contains_term(qualification_text, term)
+        for term in (
+            "校招", "校园", "秋招", "春招", "应届", "毕业生", "graduate", "实习",
+            *TARGET_POLICY.excluded_recruitment,
+        )
     )
     checks = {
         "open": not job.closed,
         "recruitment_type": (
-            not any(_contains_term(qualification_text, term) for term in TARGET_POLICY.excluded_recruitment)
+            (allows_internship or not internship_job)
+            and not any(_contains_term(qualification_text, term) for term in excluded_recruitment)
             and (not recruitment_known or _matches_recruitment_target(
                 qualification_text,
                 profile.target_recruitment_types,
@@ -143,7 +198,8 @@ def hard_filter(job: JobPosting, profile: CandidateProfile) -> tuple[bool, bool,
         ),
         "graduation_year": not graduation_years or target_year in graduation_years,
         "excluded_keywords": not any(_contains_term(text, term) for term in profile.exclude_keywords),
-        "technical_direction": any(_contains_term(text, term) for term in TARGET_TERMS),
+        "technical_direction": any(_contains_term(direction_text, term) for term in TARGET_TERMS),
+        "target_direction": not profile.target_directions or bool(direction_hits),
     }
     year_known = bool(graduation_years)
     qualification_pending = not job.qualification_confirmed and not (recruitment_known and year_known)

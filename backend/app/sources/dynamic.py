@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
@@ -341,6 +341,265 @@ class AntSourceAdapter(PublicJsonSourceAdapter):
             published_at=published_at,
             evidence_metadata={"source_url": self.api_url, "parser_version": self.parser_version},
         )
+
+
+class AlibabaSourceAdapter(PublicJsonSourceAdapter):
+    parser_version = "2.0"
+    batch_api_url = "https://campus-talent.alibaba.com/searchCondition/listBatch"
+    search_api_url = "https://campus-talent.alibaba.com/position/search"
+    detail_url = "https://campus-talent.alibaba.com/campus/position/{id}"
+
+    async def discover(self, context: CrawlContext) -> list[JobStub]:
+        await self._get(context, self.start_url)
+        csrf = context.client.cookies.get("XSRF-TOKEN")
+        if not csrf:
+            raise ValueError("阿里巴巴校招页未返回 CSRF 令牌")
+        batches = await self._post_json(context, f"{self.batch_api_url}?_csrf={csrf}", {})
+        graduate_batches = (batches.get("content") or {}).get("graduate") or []
+        target_batches = [
+            item for item in graduate_batches
+            if isinstance(item, dict) and "2027" in f"{item.get('name', '')}{item.get('remark', '')}"
+        ]
+        results: dict[str, JobStub] = {}
+        page_size = min(context.max_jobs, 100)
+        for batch in target_batches:
+            page = 1
+            while len(results) < context.max_jobs:
+                response = await self._post_json(
+                    context,
+                    f"{self.search_api_url}?_csrf={csrf}",
+                    {
+                        "batchId": batch["id"],
+                        "pageIndex": page,
+                        "pageSize": page_size,
+                        "channel": "campus_group_official_site",
+                        "language": "zh",
+                    },
+                )
+                content = response.get("content") or {}
+                items = content.get("datas") or []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    job_id = str(item.get("id") or "").strip()
+                    title = str(item.get("name") or "").strip()
+                    if not job_id or not title:
+                        continue
+                    raw = {
+                        **item,
+                        "_target_graduation_year": "2027",
+                        "_target_recruitment_type": str(batch.get("name") or "校园招聘"),
+                    }
+                    results[job_id] = JobStub(
+                        job_id,
+                        normalize_url(self.detail_url.format(id=job_id)),
+                        title,
+                        raw,
+                    )
+                    if len(results) >= context.max_jobs:
+                        break
+                total = int(content.get("totalCount") or len(items))
+                if not items or page * page_size >= total:
+                    break
+                page += 1
+        return list(results.values())
+
+    def _payload_from_raw(self, stub: JobStub) -> JobPayload | None:
+        data = stub.raw
+        title = str(data.get("name") or stub.title_hint).strip()
+        duties = str(data.get("description") or "").strip()
+        requirements = str(data.get("requirement") or "").strip()
+        if not title or not (duties or requirements):
+            return None
+        locations = data.get("workLocations") or []
+        location = "、".join(str(item) for item in locations) if isinstance(locations, list) else str(locations)
+        published_at = None
+        timestamp = data.get("publishTime")
+        if isinstance(timestamp, (int, float)):
+            published_at = datetime.fromtimestamp(timestamp / 1000, tz=UTC)
+        return JobPayload(
+            external_job_id=stub.external_job_id,
+            title=title,
+            department=str(data.get("categoryName") or "") or None,
+            location=location or None,
+            recruitment_type=str(data.get("_target_recruitment_type") or "校园招聘"),
+            graduation_year=str(data.get("_target_graduation_year") or "2027"),
+            description="\n\n".join(
+                part for part in (
+                    f"工作职责\n{duties}" if duties else "",
+                    f"任职要求\n{requirements}" if requirements else "",
+                ) if part
+            ),
+            application_url=stub.detail_url,
+            published_at=published_at,
+            evidence_metadata={"source_url": self.search_api_url, "parser_version": self.parser_version},
+        )
+
+
+class KuaishouSourceAdapter(PublicJsonSourceAdapter):
+    parser_version = "2.0"
+    api_url = "https://campus.kuaishou.cn/recruit/campus/e/api/v1/open/positions/simple"
+    detail_url = "https://campus.kuaishou.cn/recruit/campus/e/#/campus/job-info/{id}"
+    project_code = "20271779425607"
+
+    async def discover(self, context: CrawlContext) -> list[JobStub]:
+        results: dict[str, JobStub] = {}
+        page = 1
+        page_size = 10
+        while len(results) < context.max_jobs:
+            payload = await self._post_json(context, self.api_url, {
+                "recruitSubProjectCodes": [self.project_code],
+                "pageSize": page_size,
+                "pageNum": page,
+            })
+            data = payload.get("result") or {}
+            items = data.get("list") or []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                job_id = str(item.get("id") or "").strip()
+                title = str(item.get("name") or "").strip()
+                if not job_id or not title:
+                    continue
+                results[job_id] = JobStub(
+                    job_id,
+                    normalize_url(self.detail_url.format(id=job_id)),
+                    title,
+                    item,
+                )
+                if len(results) >= context.max_jobs:
+                    break
+            total_pages = int(data.get("pages") or page)
+            if not items or page >= total_pages:
+                break
+            page += 1
+        return list(results.values())
+
+    def _payload_from_raw(self, stub: JobStub) -> JobPayload | None:
+        data = stub.raw
+        title = str(data.get("name") or stub.title_hint).strip()
+        duties = str(data.get("description") or "").strip()
+        requirements = str(data.get("positionDemand") or "").strip()
+        if not title or not (duties or requirements):
+            return None
+        location = "、".join(
+            str(item.get("name") or item.get("label") or "")
+            for item in data.get("workLocationDicts") or []
+            if isinstance(item, dict) and (item.get("name") or item.get("label"))
+        )
+        return JobPayload(
+            external_job_id=stub.external_job_id,
+            title=title,
+            department=str(data.get("departmentName") or "") or None,
+            location=location or str(data.get("workLocationCode") or "") or None,
+            recruitment_type="校园招聘",
+            graduation_year="2027",
+            description="\n\n".join(
+                part for part in (
+                    f"工作职责\n{duties}" if duties else "",
+                    f"任职要求\n{requirements}" if requirements else "",
+                ) if part
+            ),
+            application_url=stub.detail_url,
+            evidence_metadata={"source_url": self.api_url, "parser_version": self.parser_version},
+        )
+
+
+class MeituanSourceAdapter(PublicJsonSourceAdapter):
+    parser_version = "2.0"
+    api_url = "https://zhaopin.meituan.com/api/official/job/getJobList"
+    detail_url = "https://zhaopin.meituan.com/web/position/detail?jobUnionId={id}"
+
+    async def discover(self, context: CrawlContext) -> list[JobStub]:
+        results: list[JobStub] = []
+        page = 1
+        page_size = 10
+        while len(results) < context.max_jobs:
+            payload = await self._post_json(context, self.api_url, {
+                "page": {"pageNo": page, "pageSize": page_size},
+                "jobShareType": "1",
+                "keywords": "",
+                "cityList": [],
+                "department": [],
+                "jfJgList": [{"code": "11001", "subCode": []}],
+                "jobType": [{"code": "1", "subCode": ["1"]}, {"code": "4", "subCode": ["1"]}],
+                "typeCode": ["1", "1"],
+                "specialCode": ["1", "3"],
+                "u_query_id": "",
+                "r_query_id": "",
+            })
+            data = payload.get("data") or {}
+            items = data.get("list") or []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                job_id = str(item.get("jobUnionId") or "").strip()
+                title = str(item.get("name") or "").strip()
+                if not job_id or not title or item.get("jobStatus") not in (None, "000"):
+                    continue
+                results.append(JobStub(
+                    job_id,
+                    normalize_url(self.detail_url.format(id=job_id)),
+                    title,
+                    item,
+                ))
+                if len(results) >= context.max_jobs:
+                    break
+            page_info = data.get("page") or {}
+            total_pages = int(page_info.get("totalPage") or page)
+            if not items or page >= total_pages:
+                break
+            page += 1
+        return results
+
+    def _payload_from_raw(self, stub: JobStub) -> JobPayload | None:
+        data = stub.raw
+        title = str(data.get("name") or stub.title_hint).strip()
+        duties = str(
+            data.get("jobDuty") or data.get("desc") or data.get("responsibility") or data.get("description") or ""
+        ).strip()
+        requirements = str(data.get("jobRequirement") or data.get("requirement") or "").strip()
+        if not title or not (duties or requirements):
+            return None
+        cities = "、".join(
+            str(item.get("name"))
+            for item in data.get("cityList") or []
+            if isinstance(item, dict) and item.get("name")
+        )
+        departments = "、".join(
+            str(item.get("name"))
+            for item in data.get("department") or []
+            if isinstance(item, dict) and item.get("name")
+        )
+        published_at = None
+        timestamp = data.get("firstPostTime") or data.get("refreshTime")
+        if isinstance(timestamp, (int, float)):
+            published_at = datetime.fromtimestamp(timestamp / 1000, tz=UTC)
+        description = "\n\n".join(
+            part for part in (
+                f"工作职责\n{duties}" if duties else "",
+                f"任职要求\n{requirements}" if requirements else "",
+            ) if part
+        )
+        return JobPayload(
+            external_job_id=stub.external_job_id,
+            title=title,
+            department=departments or str(data.get("jobFamilyGroup") or data.get("jobFamily") or "") or None,
+            location=cities or None,
+            recruitment_type="校园招聘",
+            graduation_year="2027" if "2027" in f"{title}\n{description}" else None,
+            description=description,
+            application_url=stub.detail_url,
+            published_at=published_at,
+            evidence_metadata={"source_url": self.api_url, "parser_version": self.parser_version},
+        )
+
+    async def fetch_detail(self, stub: JobStub, context: CrawlContext) -> JobPayload:
+        del context
+        payload = self._payload_from_raw(stub)
+        if payload is None:
+            raise ValueError("美团校园岗位缺少职责和任职要求")
+        return payload
 
 
 class MihoyoSourceAdapter(PublicJsonSourceAdapter):

@@ -49,6 +49,24 @@ def stable_fact_id(content_hash: str, document_hash: str, salt: str = "") -> str
     return f"fact_{value}"
 
 
+def _retire_older_same_name_facts(db: Session, document: ResumeDocument) -> None:
+    older_document_ids = db.scalars(
+        select(ResumeDocument.id).where(
+            ResumeDocument.original_name == document.original_name,
+            ResumeDocument.id < document.id,
+        )
+    ).all()
+    if not older_document_ids:
+        return
+    for fact in db.scalars(
+        select(ResumeFact).where(
+            ResumeFact.document_id.in_(older_document_ids),
+            ResumeFact.active.is_(True),
+        )
+    ):
+        fact.active = False
+
+
 def create_resume(
     db: Session,
     *,
@@ -99,6 +117,7 @@ def create_resume(
                     confidence=float(item["confidence"]),
                 )
             )
+        _retire_older_same_name_facts(db, document)
     except ValueError as exc:
         document.parse_status = ResumeParseStatus.failed.value
         document.parse_error = str(exc)
@@ -113,9 +132,10 @@ def build_profile(db: Session) -> CandidateProfile:
     texts = [fact.redacted_text for fact in facts]
     combined = "\n".join(texts).lower()
     profile.skills = [token for token in SKILL_TOKENS if token.lower() in combined]
-    profile.target_directions = [
-        direction for direction, markers in DIRECTION_RULES if any(marker in combined for marker in markers)
-    ] or ["软件开发"]
+    if not profile.target_directions:
+        profile.target_directions = [
+            direction for direction, markers in DIRECTION_RULES if any(marker in combined for marker in markers)
+        ] or ["软件开发"]
     profile.education_level = next(
         (level for level in ("博士", "硕士", "本科", "大专") if any(level in text for text in texts)),
         None,
@@ -163,6 +183,7 @@ def reparse_document(db: Session, document: ResumeDocument) -> ResumeDocument:
     for fact in document_facts:
         if fact.content_hash not in extracted_hashes and fact.supersedes_fact_id is None:
             fact.active = False
+    _retire_older_same_name_facts(db, document)
     document.redacted_text = parsed.redacted_text
     document.pii_local = parsed.pii
     document.parse_status = (

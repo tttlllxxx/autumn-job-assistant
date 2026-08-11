@@ -47,7 +47,7 @@ class JobPage(BaseModel):
 class SourceRunRequest(BaseModel):
     source_keys: list[str] | None = None
     allow_browser: bool = True
-    max_jobs_per_source: int = Field(default=100, ge=1, le=500)
+    max_jobs_per_source: int = Field(default=500, ge=1, le=500)
 
 
 class CustomSourceCreate(BaseModel):

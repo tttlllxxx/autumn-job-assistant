@@ -116,9 +116,9 @@ def test_hard_filter_excludes_social_and_non_target_direction(db: Session) -> No
 def test_hard_filter_uses_graduation_context_not_unrelated_years(db: Session) -> None:
     profile = add_profile_and_fact(db)
     eligible = add_job(
-        db, 1, "算法工程师", "参与 2025 年启动的项目，面向 2027 届毕业生招聘", "校园招聘", "2027"
+        db, 1, "RAG 算法工程师", "参与 2025 年启动的项目，面向 2027 届毕业生招聘", "校园招聘", "2027"
     )
-    wrong_year = add_job(db, 2, "算法工程师", "负责机器学习平台", "校园招聘", "2026")
+    wrong_year = add_job(db, 2, "RAG 算法工程师", "负责机器学习平台", "校园招聘", "2026")
 
     assert hard_filter(eligible, profile)[:2] == (True, False)
     assert hard_filter(wrong_year, profile)[0] is False
@@ -142,6 +142,113 @@ def test_hard_filter_reads_recruitment_type_from_description(db: Session) -> Non
     social = add_job(db, 1, "RAG 工程师", "这是社会招聘岗位，负责 Python RAG 开发", None, "2027")
 
     assert hard_filter(social, profile)[0] is False
+
+
+@pytest.mark.parametrize("recruitment_type", ["阿里巴巴2027届应届生", "2027 Graduate Recruitment"])
+def test_hard_filter_treats_graduate_recruitment_as_known_campus_hiring(
+    db: Session,
+    recruitment_type: str,
+) -> None:
+    profile = add_profile_and_fact(db)
+    job = add_job(db, 1, "RAG 工程师", "负责 RAG 应用研发", recruitment_type, "2027")
+
+    assert hard_filter(job, profile)[:2] == (True, False)
+
+
+@pytest.mark.parametrize(
+    ("title", "recruitment_type"),
+    [
+        ("RAG 工程师实习生", "校园招聘"),
+        ("具身模型算法工程师【转正实习】", "校园招聘"),
+        ("AI Agent Intern", "Campus Recruitment"),
+        ("RAG 工程师", "校园招聘 · 实习"),
+    ],
+)
+def test_hard_filter_excludes_internship_job_identity(
+    db: Session,
+    title: str,
+    recruitment_type: str,
+) -> None:
+    profile = add_profile_and_fact(db)
+    internship = add_job(db, 1, title, "负责 Python RAG 平台开发", recruitment_type, "2027")
+    internship.qualification_confirmed = True
+
+    passed, pending, checks = hard_filter(internship, profile)
+
+    assert passed is False
+    assert pending is False
+    assert checks["recruitment_type"] is False
+
+
+def test_hard_filter_keeps_formal_job_with_internship_experience_and_internvl(db: Session) -> None:
+    profile = add_profile_and_fact(db)
+    formal = add_job(
+        db,
+        1,
+        "InternVL 多模态 RAG 工程师",
+        "负责 RAG 模型应用开发。任职要求：有大模型实习经验者优先。",
+        "校园招聘",
+        "2027",
+    )
+
+    assert hard_filter(formal, profile)[0] is True
+
+
+def test_hard_filter_uses_core_responsibilities_for_technical_direction(db: Session) -> None:
+    profile = add_profile_and_fact(db)
+    unrelated = add_job(
+        db,
+        1,
+        "人力资源专员",
+        "负责招聘流程和员工关系。工作要求：熟练使用 AI Agent 和 Python 工具。",
+        "校园招聘",
+        "2027",
+    )
+
+    passed, _pending, checks = hard_filter(unrelated, profile)
+
+    assert passed is False
+    assert checks["technical_direction"] is False
+    assert checks["target_direction"] is False
+
+
+def test_target_direction_requires_development_context_not_tool_usage(db: Session) -> None:
+    profile = add_profile_and_fact(db)
+    profile.target_directions = ["AI Agent 开发"]
+    market = add_job(
+        db,
+        1,
+        "用户增长市场",
+        "负责品牌推广，主动运用 AI Agent 工具生成文案。",
+        "校园招聘",
+        "2027",
+    )
+    developer = add_job(
+        db,
+        2,
+        "后端开发工程师",
+        "负责构建 AI Agent 工作流和工具调用平台。",
+        "校园招聘",
+        "2027",
+    )
+
+    assert hard_filter(market, profile)[2]["target_direction"] is False
+    assert hard_filter(developer, profile)[2]["target_direction"] is True
+
+
+def test_target_direction_ignores_agent_tool_even_when_sentence_mentions_engineering_efficiency(db: Session) -> None:
+    profile = add_profile_and_fact(db)
+    profile.target_directions = ["AI Agent 开发"]
+    reinforcement_learning = add_job(
+        db,
+        1,
+        "强化学习算法研究员",
+        "负责多模态模型的强化学习研究。熟练使用 AI coding/Agent 工具，提升研发效率。",
+        "校园招聘",
+        "2027",
+    )
+
+    assert hard_filter(reinforcement_learning, profile)[2]["target_direction"] is False
 
 
 def test_rule_score_uses_profile_directions_and_word_boundaries(db: Session) -> None:

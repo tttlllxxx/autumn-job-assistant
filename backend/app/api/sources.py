@@ -186,7 +186,7 @@ async def add_custom_source(
     try:
         configs.append({"source_key": source_key, "display_name": normalized_name, "official_entry": entry})
         save_custom_source_configs(db, configs)
-        run = await run_source(db, source_key, allow_browser=True, max_jobs=100)
+        run = await run_source(db, source_key, allow_browser=True, max_jobs=500)
         result = {
             "source_key": source_key,
             "success": run.success,
@@ -231,7 +231,7 @@ async def update_source_entry(source_key: str, payload: SourceUpdate, db: Sessio
             overrides = source_entry_overrides(db)
             overrides[source_key] = entry
             save_source_entry_overrides(db, overrides)
-        run = await run_source(db, source_key, allow_browser=True, max_jobs=100)
+        run = await run_source(db, source_key, allow_browser=True, max_jobs=500)
         result = {
             "source_key": source_key,
             "official_entry": entry,

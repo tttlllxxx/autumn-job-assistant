@@ -146,7 +146,8 @@ def parse_resume(path: Path, media_type: str) -> ParsedResume:
 
 
 def category_for_heading(heading: str) -> str | None:
-    value = re.sub(r"[#*\s：:]", "", heading)
+    value = re.sub(r"^[^\u4e00-\u9fffA-Za-z0-9]+", "", heading)
+    value = re.sub(r"[#*\s：:]", "", value)
     patterns = {
         "project": r"^(?:个人)?项目(?:经历|经验|实践|作品)?$",
         "education": r"^(?:教育|学历)(?:背景|经历|信息)?$",
@@ -158,6 +159,37 @@ def category_for_heading(heading: str) -> str | None:
         if re.fullmatch(pattern, value):
             return category
     return None
+
+
+DATE_RANGE = re.compile(r"20\d{2}[./-]\d{1,2}\s*[–—−~至-]+\s*(?:20\d{2}[./-]\d{1,2}|至?\s*今)")
+EXPERIENCE_ORGANIZATION = re.compile(r"公司|集团|研究院|实验室|事业部|中心|\bBU\b|科技|银行", re.IGNORECASE)
+EXPERIENCE_ROLE = re.compile(r"实习生|工程师|研究员|开发|研发|算法|产品经理|设计师|架构师")
+
+
+def _looks_like_experience_header(text: str) -> bool:
+    has_date = bool(DATE_RANGE.search(text))
+    has_organization = bool(EXPERIENCE_ORGANIZATION.search(text))
+    has_role = bool(EXPERIENCE_ROLE.search(text))
+    return (has_organization and (has_role or has_date)) or (has_role and has_date)
+
+
+def _looks_like_project_header(text: str, emphasized: bool) -> bool:
+    return emphasized or bool(DATE_RANGE.search(text))
+
+
+def _group_text(lines: list[tuple[str, ParsedLine]]) -> str:
+    paragraphs: list[str] = []
+    continuing_bullet = False
+    for text, item in lines:
+        starts_bullet = bool(re.match(r"^[\s>*•·\-–—]+", item.text))
+        if continuing_bullet and not starts_bullet:
+            paragraphs[-1] += text
+        else:
+            paragraphs.append(text)
+        continuing_bullet = starts_bullet or (continuing_bullet and not starts_bullet)
+        if _looks_like_experience_header(text) or DATE_RANGE.search(text):
+            continuing_bullet = False
+    return "\n".join(paragraphs)
 
 
 def extract_atomic_facts(parsed: ParsedResume) -> list[dict[str, object]]:
@@ -190,7 +222,7 @@ def extract_atomic_facts(parsed: ParsedResume) -> list[dict[str, object]]:
         nonlocal grouped_lines, grouped_category, group_has_title
         if grouped_lines and grouped_category:
             add_fact(
-                "\n".join(text for text, _ in grouped_lines),
+                _group_text(grouped_lines),
                 grouped_lines[0][1],
                 grouped_category,
                 max_length=2000,
@@ -200,8 +232,11 @@ def extract_atomic_facts(parsed: ParsedResume) -> list[dict[str, object]]:
         group_has_title = False
 
     for item in parsed.lines:
-        line = re.sub(r"^[\s#>*•·\-]+", "", item.text).strip()
+        line = re.sub(r"^[^\u4e00-\u9fffA-Za-z0-9\[]+", "", item.text).strip()
         if not line or line in {"[NAME]", "个人简历", "简历"}:
+            continue
+        without_pii = re.sub(r"\[(?:NAME|EMAIL|PHONE|ADDRESS|ID_NUMBER)\]", "", line)
+        if not re.search(r"[\u4e00-\u9fffA-Za-z0-9]", without_pii):
             continue
         if re.fullmatch(r"(?:姓名|邮箱|电话|手机|住址|地址)?\s*[：:]?\s*\[(?:NAME|EMAIL|PHONE|ADDRESS|ID_NUMBER)\]", line):
             continue
@@ -214,11 +249,15 @@ def extract_atomic_facts(parsed: ParsedResume) -> list[dict[str, object]]:
         if category in {"project", "experience", "skill"}:
             if grouped_category and grouped_category != category:
                 flush_group()
-            if category in {"project", "experience"} and item.emphasized and grouped_lines and group_has_title:
+            starts_new_entry = (
+                category == "project" and _looks_like_project_header(normalized, item.emphasized)
+                or category == "experience" and _looks_like_experience_header(normalized)
+            )
+            if starts_new_entry and grouped_lines and group_has_title:
                 flush_group()
             grouped_category = category
             grouped_lines.append((normalized, item))
-            group_has_title = group_has_title or item.emphasized
+            group_has_title = group_has_title or starts_new_entry or item.emphasized
             continue
         flush_group()
         add_fact(normalized, item, category)

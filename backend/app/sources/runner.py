@@ -18,7 +18,7 @@ USER_AGENT = "AutumnJobAssistant/0.1 (single-user personal job search)"
 
 
 def _payload_rejection_reason(payload: JobPayload, policy: TargetPolicy = TARGET_POLICY) -> str | None:
-    return policy.source_rejection_reason(payload.title, payload.description)
+    return policy.source_rejection_reason(payload.title, payload.description, payload.recruitment_type)
 
 
 def _upsert_job(db: Session, source_key: str, company: str, payload: JobPayload) -> tuple[JobPosting, bool]:
@@ -71,16 +71,20 @@ def _upsert_job(db: Session, source_key: str, company: str, payload: JobPayload)
     return job, created
 
 
-async def run_source(db: Session, source_key: str, *, allow_browser: bool = False, max_jobs: int = 100) -> SourceRun:
+async def run_source(db: Session, source_key: str, *, allow_browser: bool = False, max_jobs: int = 500) -> SourceRun:
     adapter = get_registry(db)[source_key]
     run = SourceRun(source_key=source_key, adapter_version=adapter.parser_version)
     db.add(run)
     db.commit()
     seen_ids: set[str] = set()
     rejection_reasons: Counter[str] = Counter()
+    policy_rejected_count = 0
     profile = db.get(CandidateProfile, 1)
     policy = (
-        TargetPolicy(graduation_year=profile.target_graduation_year or TARGET_POLICY.graduation_year)
+        TargetPolicy(
+            graduation_year=profile.target_graduation_year or TARGET_POLICY.graduation_year,
+            allow_internship=TargetPolicy.targets_include_internship(profile.target_recruitment_types),
+        )
         if profile
         else TARGET_POLICY
     )
@@ -102,6 +106,7 @@ async def run_source(db: Session, source_key: str, *, allow_browser: bool = Fals
                     rejection_reason = _payload_rejection_reason(payload, policy)
                     if rejection_reason is not None:
                         rejection_reasons[rejection_reason] += 1
+                        policy_rejected_count += 1
                         continue
                     if payload.external_job_id in seen_ids:
                         rejection_reasons["重复岗位"] += 1
@@ -113,7 +118,7 @@ async def run_source(db: Session, source_key: str, *, allow_browser: bool = Fals
                 except (httpx.HTTPError, ValueError):
                     rejection_reasons["详情解析失败"] += 1
                     continue
-            if not seen_ids:
+            if not seen_ids and not policy_rejected_count:
                 raise ValueError("未采集到字段完整的有效岗位")
         active_jobs = db.scalars(
             select(JobPosting).where(JobPosting.source_key == source_key, JobPosting.closed.is_(False))
@@ -155,7 +160,7 @@ async def run_source(db: Session, source_key: str, *, allow_browser: bool = Fals
     return run
 
 
-async def run_all_sources(*, allow_browser: bool = False, max_jobs: int = 100) -> None:
+async def run_all_sources(*, allow_browser: bool = False, max_jobs: int = 500) -> None:
     from app.core.database import SessionLocal
 
     with SessionLocal() as db:

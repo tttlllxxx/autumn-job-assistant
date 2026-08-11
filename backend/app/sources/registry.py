@@ -6,7 +6,15 @@ from sqlalchemy.orm import Session
 from app.models.entities import AppSetting
 from app.sources.ats import build_ats_adapter
 from app.sources.base import OfficialSourceAdapter
-from app.sources.dynamic import AntSourceAdapter, MihoyoSourceAdapter, NeteaseSourceAdapter, TencentSourceAdapter
+from app.sources.dynamic import (
+    AlibabaSourceAdapter,
+    AntSourceAdapter,
+    KuaishouSourceAdapter,
+    MeituanSourceAdapter,
+    MihoyoSourceAdapter,
+    NeteaseSourceAdapter,
+    TencentSourceAdapter,
+)
 
 
 CUSTOM_SOURCES_KEY = "custom_sources"
@@ -19,9 +27,9 @@ SOURCE_SPECS = (
     ("alibaba", "阿里巴巴", "https://campus-talent.alibaba.com/campus/position-list", ("campus-talent.alibaba.com", "talent.alibaba.com"), ("position", "job"), "https://campus-talent.alibaba.com/campus/position/{id}"),
     ("tencent", "腾讯", "https://join.qq.com/post.html?query=p_1", ("careers.tencent.com", "join.qq.com"), ("position", "job", "post"), None),
     ("baidu", "百度", "https://talent.baidu.com/jobs/list?projectType=1", ("talent.baidu.com",), ("/jobs/detail/",), "https://talent.baidu.com/jobs/detail/GRADUATE/{id}"),
-    ("meituan", "美团", "https://zhaopin.meituan.com/web/position?hiringType=1_1", ("zhaopin.meituan.com",), ("position/detail", "jobUnionId"), "https://zhaopin.meituan.com/web/position/detail?jobUnionId={id}"),
+    ("meituan", "美团", "https://zhaopin.meituan.com/web/position?hiringType=1_1,4_1&jfJgList=11001_-1&hiringSpecial=1,3", ("zhaopin.meituan.com",), ("position/detail", "jobUnionId"), "https://zhaopin.meituan.com/web/position/detail?jobUnionId={id}"),
     ("xiaohongshu", "小红书", "https://job.xiaohongshu.com/campus/position", ("job.xiaohongshu.com",), ("/position/",), "https://job.xiaohongshu.com/campus/position/{id}"),
-    ("kuaishou", "快手", "https://campus.kuaishou.cn/recruit/campus/e/#/campus/jobs?recruitSubProjectCodes=20271779425607", ("campus.kuaishou.cn",), ("position", "job", "detail"), None),
+    ("kuaishou", "快手", "https://campus.kuaishou.cn/recruit/campus/e/#/campus/jobs?pageNum=1&recruitSubProjectCodes=20271779425607", ("campus.kuaishou.cn",), ("position", "job", "detail"), None),
     ("huawei", "华为", "https://career.huawei.com/cn/campus-recruitment-job-list", ("career.huawei.com", "apigw-dgg-b0.huawei.com"), ("job-details",), "https://career.huawei.com/cn/job-details?advertisementId={id}"),
     ("ant", "蚂蚁集团", "https://talent.antgroup.com/campus-full-list", ("talent.antgroup.com", "hrcareersweb.antgroup.com"), ("position", "job"), None),
     ("jd", "京东", "https://campus.jd.com/#/jobs", ("campus.jd.com",), ("job", "position"), "https://campus.jd.com/#/jobs"),
@@ -36,7 +44,7 @@ SOURCE_FIELD_MAPS = {
     "bytedance": {"title": ("title",), "id": ("id",), "description": ("description",), "location": ("city_info", "location")},
     "alibaba": {"title": ("positionName", "name"), "id": ("positionId", "id"), "description": ("description", "requirement"), "location": ("workLocation", "location")},
     "tencent": {"title": ("positionTitle", "RecruitPostName"), "id": ("postId", "RecruitPostId", "PostId"), "url": ("PostURL",), "description": ("desc", "topicDetail", "Responsibility"), "location": ("workCityList", "workCities", "LocationName")},
-    "baidu": {"title": ("jobName", "name"), "id": ("jobId", "id"), "description": ("jobDescription", "description"), "location": ("workLocation", "location")},
+    "baidu": {"title": ("jobName", "name"), "id": ("jobId", "id"), "description": ("workContent", "serviceCondition", "jobDescription", "description"), "location": ("workPlace", "workLocation", "location")},
     "meituan": {"title": ("name", "title"), "id": ("jobUnionId", "id"), "description": ("jobDescription", "description", "responsibility"), "location": ("city", "location")},
     "xiaohongshu": {"title": ("positionName", "name"), "id": ("positionId", "id"), "description": ("jobDescription", "description"), "location": ("workLocation", "location")},
     "kuaishou": {"title": ("name",), "id": ("id", "code"), "description": ("description", "positionDemand"), "location": ("workLocationDicts", "workLocationCode")},
@@ -53,8 +61,11 @@ SOURCE_FIELD_MAPS = {
 
 def build_registry() -> dict[str, OfficialSourceAdapter]:
     adapter_types = {
+        "alibaba": AlibabaSourceAdapter,
         "ant": AntSourceAdapter,
+        "kuaishou": KuaishouSourceAdapter,
         "tencent": TencentSourceAdapter,
+        "meituan": MeituanSourceAdapter,
         "netease": NeteaseSourceAdapter,
         "mihoyo": MihoyoSourceAdapter,
     }

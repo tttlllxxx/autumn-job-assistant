@@ -139,3 +139,40 @@ def test_experience_splits_by_role_title_and_skills_merge_as_one_fact() -> None:
         ("experience", "虚构乙公司 · 算法实习生\n训练分类模型"),
         ("skill", "语言：Python、Java\n框架：FastAPI、PyTorch"),
     ]
+
+
+def test_pdf_icon_headings_and_experience_subprojects_stay_in_one_employer_fact() -> None:
+    parsed = ParsedResume(
+        lines=[
+            ParsedLine("\uf0f2工作经历", 1, 1),
+            ParsedLine("华为智能汽车解决方案BU｜AI应用实习生 2026.06 – 至 今", 1, 2),
+            ParsedLine("• 毫米波雷达模型鲁棒性评测与分析", 1, 3),
+            ParsedLine("– 项目概述：累计评测7个模型版本(约", 1, 4),
+            ParsedLine("5万帧数据）。", 1, 5),
+            ParsedLine("• LLM Agent 研发流程编排与治理框架", 1, 6),
+            ParsedLine("– 状态管理：支持跨会话恢复。", 1, 7),
+            ParsedLine("\uf0ad项目经历", 1, 8),
+            ParsedLine("Coding Agent：终端AI编程助手 2026.05 – 2026.08", 1, 9),
+            ParsedLine("• 实现 Agent Loop。", 1, 10),
+            ParsedLine("MiniMind：小型LLM训练与对齐 2026.02 – 2026.04", 1, 11),
+            ParsedLine("• 打通 SFT 与 DPO 流程。", 1, 12),
+        ],
+        redacted_text="",
+        pii={},
+        warnings=[],
+    )
+
+    facts = extract_atomic_facts(parsed)
+
+    assert [(fact["category"], fact["text"]) for fact in facts] == [
+        (
+            "experience",
+            "华为智能汽车解决方案BU｜AI应用实习生 2026.06 – 至 今\n"
+            "毫米波雷达模型鲁棒性评测与分析\n"
+            "项目概述：累计评测7个模型版本(约5万帧数据）。\n"
+            "LLM Agent 研发流程编排与治理框架\n"
+            "状态管理：支持跨会话恢复。",
+        ),
+        ("project", "Coding Agent：终端AI编程助手 2026.05 – 2026.08\n实现 Agent Loop。"),
+        ("project", "MiniMind：小型LLM训练与对齐 2026.02 – 2026.04\n打通 SFT 与 DPO 流程。"),
+    ]
