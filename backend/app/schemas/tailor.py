@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class TailoredSentence(BaseModel):
-    text: str = Field(min_length=2, max_length=500)
+    text: str = Field(min_length=2, max_length=2000)
     fact_ids: list[str] = Field(min_length=1)
 
 
@@ -20,7 +20,9 @@ class TailorLLMResponse(BaseModel):
 
 class TailorAdviceRewrite(BaseModel):
     fact_id: str
-    revised_text: str = Field(min_length=2, max_length=500)
+    action: str = Field(min_length=2, max_length=240)
+    revised_text: str = Field(min_length=2, max_length=2000)
+    rationale: str = Field(min_length=2, max_length=300)
 
 
 class TailorAdviceLLMResponse(BaseModel):

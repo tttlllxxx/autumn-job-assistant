@@ -7,8 +7,9 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.core.database import Base
 from app.models.entities import CandidateProfile, CostLedger, JobPosting, Recommendation, ResumeDocument, ResumeFact
-from app.schemas.tailor import TailoredSentence
+from app.schemas.tailor import TailorAdviceLLMResponse, TailorAdviceRewrite, TailoredSentence
 from app.services import tailor as tailor_service
+from app.services.llm import StructuredResult
 from app.services.tailor import build_tailor_advice, create_tailored_resume, save_tailor_advice, stored_tailor_advice, validate_sentences
 
 
@@ -107,8 +108,21 @@ def test_tailor_advice_is_built_for_one_clicked_job_from_its_latest_evidence() -
     assert advice["suggestions"][0]["section"] == "项目经历"
     assert "Python、RAG" in advice["suggestions"][0]["action"]
     assert advice["suggestions"][0]["current_text"] == "使用 Python 构建 RAG 课程项目"
-    assert advice["suggestions"][0]["suggested_text"] == "【Python、RAG】使用 Python 构建 RAG 课程项目"
+    assert advice["suggestions"][0]["suggested_text"] == "使用 Python 构建 RAG 课程项目"
     assert advice["gaps"] == ["缺少生产部署经验"]
+
+
+def test_long_confirmed_experience_can_be_validated_without_truncation() -> None:
+    facts = fact_map()
+    long_text = "负责模型评测与流程治理。" * 45
+    facts["fact_safe"].redacted_text = long_text
+    result = validate_sentences(
+        [TailoredSentence(text=long_text, fact_ids=["fact_safe"])],
+        facts,
+    )
+
+    assert len(long_text) > 500
+    assert result["valid"] is True
 
 
 @pytest.mark.asyncio
@@ -143,6 +157,62 @@ async def test_tailor_advice_only_appears_after_explicit_generation() -> None:
 
         assert stored is not None
         assert stored["suggestions"] == generated["suggestions"]
+
+
+@pytest.mark.asyncio
+async def test_tailor_advice_uses_specific_llm_action_rewrite_and_rationale(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        document = ResumeDocument(
+            original_name="fictional.md", stored_path="/tmp/fictional.md", media_type="text/markdown",
+            content_hash="6" * 64, parse_status="parsed", redacted_text="",
+        )
+        job = JobPosting(
+            company="虚构公司", source_key="manual", external_job_id="ADVICE-3", title="RAG 工程师",
+            description="熟悉 Python，具备 RAG 项目经验", normalized_url="https://example.invalid/jobs/advice-3",
+            description_hash="7" * 64,
+        )
+        db.add_all([document, job]); db.flush()
+        db.add(ResumeFact(
+            fact_id="fact_llm_advice", category="project", original_text="使用 Python 构建 RAG 课程项目",
+            redacted_text="使用 Python 构建 RAG 课程项目", document_id=document.id, content_hash="8" * 64,
+            active=True, confirmed=True,
+        ))
+        db.add(Recommendation(
+            job_id=job.id, version=1, hard_filter_passed=True, hard_filter_details={}, qualification_pending=False,
+            rule_score=20, vector_score=20, final_score=70, rerank_status="completed",
+            evidence={
+                "fact_ids": ["fact_llm_advice"], "matching_facts": ["已有 RAG 项目经验"],
+                "jd_quotes": ["具备 RAG 项目经验"], "rule": {"skill_hits": ["Python", "RAG"]},
+            },
+        ))
+        db.commit()
+
+        async def fake_call(*args, **_kwargs):
+            messages = args[2]
+            assert "不得机械添加关键词前缀" in messages[0]["content"]
+            assert "target_requirement" in messages[1]["content"]
+            return StructuredResult(
+                value=TailorAdviceLLMResponse(rewrites=[TailorAdviceRewrite(
+                    fact_id="fact_llm_advice",
+                    action="把技术栈和项目动作放到句首，直接对应 JD 的 RAG 项目要求。",
+                    revised_text="基于 Python 构建 RAG 课程项目。",
+                    rationale="原事实同时包含 Python 与 RAG，可直接支撑 JD 的项目经验要求。",
+                )]),
+                provider="codex",
+                model_name="fictional-model",
+            )
+
+        monkeypatch.setattr(tailor_service, "llm_available", lambda *_args: (True, ""))
+        monkeypatch.setattr(tailor_service, "call_structured", fake_call)
+        generated = await save_tailor_advice(db, job, Settings())
+
+    suggestion = generated["suggestions"][0]
+    assert suggestion["action"].startswith("把技术栈和项目动作放到句首")
+    assert suggestion["suggested_text"] == "基于 Python 构建 RAG 课程项目。"
+    assert suggestion["rationale"].startswith("原事实同时包含 Python 与 RAG")
+    assert "fact_id" not in suggestion
 
 
 @pytest.mark.asyncio

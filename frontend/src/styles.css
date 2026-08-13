@@ -352,7 +352,7 @@ blockquote { margin-left: 0; padding: 1px 0 1px 13px; color: #555761; border-lef
 .application-summary strong { color: var(--ink); font-size: 21px; }
 .application-summary .attention { background: var(--warning-soft); border-color: #efd8aa; }
 .application-summary .attention strong { color: var(--warning); }
-.application-controls { margin-bottom: 10px; padding: 10px; display: grid; grid-template-columns: minmax(220px, 1fr) 140px 125px 125px 82px auto 42px; align-items: center; gap: 8px; background: #fff; border: 1px solid var(--line); border-radius: var(--radius-lg); }
+.application-controls { margin-bottom: 10px; padding: 10px; display: grid; grid-template-columns: minmax(190px, 1fr) 130px 120px 115px 115px 82px auto 42px; align-items: center; gap: 8px; background: #fff; border: 1px solid var(--line); border-radius: var(--radius-lg); }
 .application-controls label { margin: 0; }
 .application-controls input, .application-controls select { min-height: 34px; padding: 6px 9px; font-size: 11px; }
 .application-controls > button { min-height: 34px; padding: 6px 9px; font-size: 10px; white-space: nowrap; }
@@ -360,25 +360,27 @@ blockquote { margin-left: 0; padding: 1px 0 1px 13px; color: #555761; border-lef
 .application-reset-controls { color: var(--ink-subtle); }
 .application-controls > span { color: var(--ink-subtle); font-size: 10px; text-align: right; white-space: nowrap; }
 .application-table-shell { overflow-x: auto; background: #fff; border: 1px solid var(--line); border-radius: var(--radius-lg); }
-.application-table { width: 100%; min-width: 1050px; border-collapse: collapse; table-layout: fixed; }
+.application-table { width: 100%; min-width: 1160px; border-collapse: collapse; table-layout: fixed; }
 .application-table th { padding: 10px 9px; color: var(--ink-subtle); background: #fafafc; border-bottom: 1px solid var(--line); font-size: 9px; font-weight: 600; letter-spacing: .04em; text-align: left; }
-.application-table th:nth-child(1) { width: 19%; }
-.application-table th:nth-child(2) { width: 11%; }
-.application-table th:nth-child(3) { width: 17%; }
-.application-table th:nth-child(4) { width: 18%; }
+.application-table th:nth-child(1) { width: 11%; }
+.application-table th:nth-child(2) { width: 15%; }
+.application-table th:nth-child(3) { width: 10%; }
+.application-table th:nth-child(4) { width: 16%; }
 .application-table th:nth-child(5) { width: 16%; }
-.application-table th:nth-child(6) { width: 13%; }
-.application-table th:nth-child(7) { width: 6%; }
+.application-table th:nth-child(6) { width: 14%; }
+.application-table th:nth-child(7) { width: 10%; }
+.application-table th:nth-child(8) { width: 8%; }
 .application-table td { padding: 10px 9px; vertical-align: middle; border-bottom: 1px solid #eeeef1; }
 .application-table tbody tr:last-child td { border-bottom: 0; }
 .application-table tbody tr:not(.application-detail-row):hover td { background: #fcfcfe; }
 .application-table tbody tr:not(.application-detail-row):target td { background: var(--accent-soft); }
 .application-table tbody tr.saving { opacity: .62; }
-.application-table tbody tr.terminal .application-job { opacity: .58; }
+.application-table tbody tr.terminal .application-job, .application-table tbody tr.terminal .application-company { opacity: .58; }
 .application-table select, .application-table input { width: 100%; min-height: 32px; padding: 5px 7px; border-radius: 6px; font-size: 10px; }
 .application-job { min-width: 0; }
 .application-job strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .application-job strong { color: var(--ink); font-size: 11px; }
+.application-company { display: block; overflow: hidden; color: var(--ink-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .progress-selects { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
 .table-text-input, .table-date-input { background: #fbfbfc; }
 .table-date-input.due-soon { color: var(--warning); background: var(--warning-soft); border-color: #e9c982; }
@@ -387,7 +389,10 @@ blockquote { margin-left: 0; padding: 1px 0 1px 13px; color: #555761; border-lef
 .saving-label { color: var(--accent); font-size: 9px; }
 .application-row-action { text-align: right; }
 .application-row-action button { font-size: 10px; }
-.application-row-actions { display: flex; justify-content: flex-end; align-items: center; gap: 2px; }
+.application-row-actions { display: flex; flex-wrap: nowrap; justify-content: flex-end; align-items: center; gap: 5px; white-space: nowrap; }
+.application-delete-button { width: 28px; height: 28px; padding: 5px; display: inline-grid; place-items: center; color: var(--danger); background: transparent; border-color: transparent; border-radius: 6px; }
+.application-delete-button:hover:not(:disabled) { color: #fff; background: var(--danger); border-color: var(--danger); }
+.application-delete-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .application-detail-row td { padding: 0; background: #f8f8fb; }
 .application-detail { padding: 18px; border-bottom: 1px solid var(--line); }
 .application-detail-meta { margin-bottom: 14px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
@@ -480,8 +485,8 @@ progress { width: 100%; height: 8px; accent-color: var(--accent); }
   .application-table tbody tr:not(.application-detail-row) { margin-top: 10px; padding: 12px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; background: #fff; border: 1px solid var(--line); border-radius: var(--radius-lg); }
   .application-table tbody tr:not(.application-detail-row) td { padding: 0; display: grid; align-content: start; gap: 5px; border: 0; }
   .application-table tbody tr:not(.application-detail-row) td::before { content: attr(data-label); color: var(--ink-subtle); font-size: 8px; }
-  .application-table tbody tr:not(.application-detail-row) td:first-child,
-  .application-table tbody tr:not(.application-detail-row) td:nth-child(4),
+  .application-table tbody tr:not(.application-detail-row) td:nth-child(2),
+  .application-table tbody tr:not(.application-detail-row) td:nth-child(5),
   .application-table tbody tr:not(.application-detail-row) .application-row-action { grid-column: 1 / -1; }
   .application-row-action { text-align: left; }
   .application-row-actions { justify-content: flex-start; }

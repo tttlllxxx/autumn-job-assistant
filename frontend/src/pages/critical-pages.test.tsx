@@ -92,7 +92,8 @@ describe("关键页面交互", () => {
 
     renderWithClient(<MemoryRouter><Applications /></MemoryRouter>);
     expect(await screen.findByText("RAG 工程师")).toBeInTheDocument();
-    expect(screen.queryByText(/虚构科技/)).not.toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "公司" })).toBeInTheDocument();
+    expect(document.querySelector('[data-label="公司"]')).toHaveTextContent("虚构科技");
     expect(screen.getByRole("columnheader", { name: "下一步行动" })).toBeInTheDocument();
     expect(screen.getByLabelText("RAG 工程师 当前阶段")).toHaveValue("投递");
     expect(screen.getByLabelText("RAG 工程师 下一步行动")).toHaveValue("准备笔试");
@@ -135,7 +136,7 @@ describe("关键页面交互", () => {
     await waitFor(() => expect(screen.queryByText("RAG 工程师")).not.toBeInTheDocument());
   });
 
-  it("投递进度表支持组合筛选、岗位排序和升降序切换", async () => {
+  it("投递进度表按公司排列并支持公司下拉筛选、组合筛选和排序", async () => {
     const baseApplication = {
       job_id: null,
       channel: "官网",
@@ -157,30 +158,38 @@ describe("关键页面交互", () => {
       { ...baseApplication, id: 1, company: "Z 公司", position: "B 岗位", status: "已投递", current_stage: "投递", next_action_at: "2026-08-20T18:00:00", progress_updated_at: "2026-08-08T08:00:00Z" },
       { ...baseApplication, id: 2, company: "X 公司", position: "A 岗位", status: "面试中", current_stage: "一面", next_action_at: "2026-08-15T18:00:00", progress_updated_at: "2026-08-10T08:00:00Z" },
       { ...baseApplication, id: 3, company: "Y 公司", position: "C 岗位", status: "已投递", current_stage: "笔试", next_action_at: null, progress_updated_at: "2026-08-09T08:00:00Z" },
+      { ...baseApplication, id: 4, company: "X 公司", position: "D 岗位", status: "已投递", current_stage: "投递", next_action_at: "2026-08-18T18:00:00", progress_updated_at: "2026-08-07T08:00:00Z" },
     ];
-    globalThis.fetch = vi.fn(async () => jsonResponse({ items: applications, total: 3, page: 1, page_size: 200 })) as typeof fetch;
+    globalThis.fetch = vi.fn(async () => jsonResponse({ items: applications, total: 4, page: 1, page_size: 200 })) as typeof fetch;
 
     renderWithClient(<MemoryRouter><Applications /></MemoryRouter>);
     await screen.findByText("A 岗位");
     const positionOrder = () => Array.from(document.querySelectorAll<HTMLTableCellElement>("tbody .application-job strong"))
       .map((element) => element.textContent);
 
-    expect(positionOrder()).toEqual(["A 岗位", "C 岗位", "B 岗位"]);
+    expect(positionOrder()).toEqual(["A 岗位", "D 岗位", "C 岗位", "B 岗位"]);
+    expect(screen.getByLabelText("排序方式")).toHaveValue("company");
+    expect(Array.from((screen.getByLabelText("按公司筛选") as HTMLSelectElement).options).map((option) => option.text))
+      .toEqual(["全部公司", "X 公司", "Y 公司", "Z 公司"]);
+
+    fireEvent.change(screen.getByLabelText("按公司筛选"), { target: { value: "Y 公司" } });
+    expect(positionOrder()).toEqual(["C 岗位"]);
+    fireEvent.click(screen.getByRole("button", { name: "重置" }));
 
     fireEvent.change(screen.getByLabelText("按状态筛选"), { target: { value: "已投递" } });
-    expect(positionOrder()).toEqual(["C 岗位", "B 岗位"]);
+    expect(positionOrder()).toEqual(["D 岗位", "C 岗位", "B 岗位"]);
     fireEvent.change(screen.getByLabelText("按阶段筛选"), { target: { value: "笔试" } });
     expect(positionOrder()).toEqual(["C 岗位"]);
-    expect(screen.getByText("1 / 3 个岗位")).toBeInTheDocument();
+    expect(screen.getByText("1 / 4 个岗位")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "重置" }));
     fireEvent.change(screen.getByLabelText("排序方式"), { target: { value: "position" } });
-    expect(positionOrder()).toEqual(["A 岗位", "B 岗位", "C 岗位"]);
+    expect(positionOrder()).toEqual(["A 岗位", "D 岗位", "C 岗位", "B 岗位"]);
     fireEvent.click(screen.getByRole("button", { name: "当前升序，点击切换" }));
-    expect(positionOrder()).toEqual(["C 岗位", "B 岗位", "A 岗位"]);
+    expect(positionOrder()).toEqual(["B 岗位", "C 岗位", "D 岗位", "A 岗位"]);
 
     fireEvent.change(screen.getByLabelText("排序方式"), { target: { value: "deadline" } });
-    expect(positionOrder()).toEqual(["A 岗位", "B 岗位", "C 岗位"]);
+    expect(positionOrder()).toEqual(["A 岗位", "D 岗位", "C 岗位", "B 岗位"]);
     fireEvent.change(screen.getByLabelText("搜索岗位或公司"), { target: { value: "Y 公司" } });
     expect(positionOrder()).toEqual(["C 岗位"]);
   });
@@ -205,7 +214,7 @@ describe("关键页面交互", () => {
     fireEvent.click(screen.getByRole("button", { name: "保存到进度表" }));
 
     expect(await screen.findByText("AI 工程师")).toBeInTheDocument();
-    expect(screen.queryByText(/内部创建公司/)).not.toBeInTheDocument();
+    expect(document.querySelector('[data-label="公司"]')).toHaveTextContent("内部创建公司");
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       "/api/applications",
       expect.objectContaining({ method: "POST", body: expect.stringContaining('"company":"内部创建公司"') }),
@@ -549,7 +558,7 @@ describe("关键页面交互", () => {
     };
     const advice = {
       job: recommendation.job, recommendation_version: 2, updated_at: "2026-08-09T00:00:00Z", gaps: [],
-      suggestions: [{ section: "项目经历", action: "将 RAG 项目前置", current_text: "使用 Python 构建 RAG 项目", suggested_text: "【Python、RAG】使用 Python 构建 RAG 项目", rationale: "与岗位直接匹配", jd_quote: "熟悉 RAG" }],
+      suggestions: [{ section: "项目经历", action: "把技术栈和项目动作放到句首", current_text: "使用 Python 构建 RAG 项目", suggested_text: "基于 Python 构建 RAG 项目", rationale: "已有事实可直接支撑 JD 的 RAG 项目要求", jd_quote: "熟悉 RAG" }],
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
@@ -580,8 +589,9 @@ describe("关键页面交互", () => {
     renderWithClient(<MemoryRouter initialEntries={["/resumes"]}><Routes><Route path="/resumes" element={<ResumeVersions />} /><Route path="/resumes/jobs/:id" element={<TailorAdvice />} /></Routes></MemoryRouter>);
     expect(await screen.findByText("RAG 工程师")).toBeInTheDocument();
     fireEvent.click(screen.getByText("查看修改建议 →"));
-    expect(await screen.findByRole("heading", { name: "将 RAG 项目前置" })).toBeInTheDocument();
-    expect(screen.getByText("【Python、RAG】使用 Python 构建 RAG 项目")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "把技术栈和项目动作放到句首" })).toBeInTheDocument();
+    expect(screen.getByText("建议替换为")).toBeInTheDocument();
+    expect(screen.getByText("基于 Python 构建 RAG 项目")).toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([path]) => String(path) === "/api/jobs/101/tailor-advice")).toBe(true);
   });
 
